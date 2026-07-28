@@ -5,6 +5,7 @@
 
 import argparse
 import asyncio
+import contextlib
 import importlib
 import importlib.util
 import json
@@ -469,7 +470,7 @@ class TestFormalBoundaryCapture:
     """The window brackets only formal request execution."""
 
     @staticmethod
-    def _run_benchmark(logs, window, *, fail=False):
+    def _run_benchmark(logs, window, *, fail=False, pooled=True):
         serving = _import_sa_bench_module("benchmark_serving")
         backend_request_func = _import_sa_bench_module("backend_request_func")
         observed_status = []
@@ -513,7 +514,7 @@ class TestFormalBoundaryCapture:
                 goodput_config_dict={},
                 max_concurrency=4,
                 lora_modules=None,
-                request_session=MagicMock(closed=True) if fail else None,
+                request_session=MagicMock(closed=True) if (fail and pooled) else None,
                 measurement_window=window,
             )
             return asyncio.run(coroutine), observed_status
@@ -548,6 +549,12 @@ class TestFormalBoundaryCapture:
 
             def mark_failed(self, **kwargs):
                 self._inner.mark_failed(**kwargs)
+
+            def record_boundary(self, **kwargs):
+                self._inner.record_boundary(**kwargs)
+
+            def fail_at_recorded_boundary(self, reason):
+                return self._inner.fail_at_recorded_boundary(reason)
 
         result, _ = self._run_benchmark(logs, SlowWindow(_create(logs)))
 
@@ -614,6 +621,95 @@ class TestProductionResultWiring:
 
         rows = _validate(logs, _samples(result["benchmark_start_time_unix"], result["benchmark_end_time_unix"]))
         assert rows[0].power_coverage_valid is True
+
+    def _run_main(self, logs, serving, fake_request, *, after=None):
+        args = _sa_bench_args(logs)
+        patches = [
+            patch.dict(serving.ASYNC_REQUEST_FUNCS, {"dynamo": fake_request}),
+            patch.object(sys.modules["measurement_window"], "CONTAINER_LOG_DIR", str(logs)),
+            patch.object(serving, "load_tokenizer", return_value=MagicMock()),
+            patch.object(serving, "sample_random_requests", return_value=[("prompt", 8192, 1024, None)] * 4),
+            patch.object(serving, "save_to_pytorch_benchmark_format"),
+        ]
+        if after is not None:
+            patches.append(after)
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            serving.main(args)
+
+    def _ok_request(self, backend_request_func):
+        async def fake_request(request_func_input=None, pbar=None, **_kwargs):
+            return backend_request_func.RequestFuncOutput(
+                generated_text="hello",
+                success=True,
+                latency=0.01,
+                output_tokens=4,
+                ttft=0.005,
+                itl=[0.001],
+                prompt_len=8192,
+                start_time=time.perf_counter(),
+            )
+
+        return fake_request
+
+    def test_metrics_failure_publishes_the_unchanged_boundary(self, logs, monkeypatch):
+        """An exception after the formal end must not lose that boundary."""
+        serving = _import_sa_bench_module("benchmark_serving")
+        backend_request_func = _import_sa_bench_module("backend_request_func")
+        monkeypatch.setenv("SRT_MEASUREMENT_WINDOW_DIR", str(logs / "power" / WINDOWS_DIRNAME))
+
+        with pytest.raises(RuntimeError):
+            self._run_main(
+                logs,
+                serving,
+                self._ok_request(backend_request_func),
+                after=patch.object(serving, "calculate_metrics", side_effect=RuntimeError("metrics blew up")),
+            )
+
+        payload = _window_json(logs)
+        assert payload["status"] == "failed"
+        assert payload["duration"] > 0
+        assert payload["benchmark_end_time_unix"] > payload["benchmark_start_time_unix"]
+        assert "metrics blew up" in payload["reason"]
+
+    def test_result_write_failure_publishes_the_unchanged_boundary(self, logs, monkeypatch):
+        serving = _import_sa_bench_module("benchmark_serving")
+        backend_request_func = _import_sa_bench_module("backend_request_func")
+        monkeypatch.setenv("SRT_MEASUREMENT_WINDOW_DIR", str(logs / "power" / WINDOWS_DIRNAME))
+
+        with pytest.raises(OSError):
+            self._run_main(
+                logs,
+                serving,
+                self._ok_request(backend_request_func),
+                after=patch.object(serving, "save_to_pytorch_benchmark_format", side_effect=OSError("disk full")),
+            )
+
+        payload = _window_json(logs)
+        assert payload["status"] == "failed"
+        assert payload["duration"] > 0
+        assert "disk full" in payload["reason"]
+
+    def test_non_pooled_request_failure_publishes_a_failed_boundary(self, logs):
+        """Previously only the pooled path saved a boundary; now both do."""
+        window = _create(logs)
+
+        with pytest.raises(RuntimeError):
+            TestFormalBoundaryCapture._run_benchmark(logs, window, fail=True, pooled=False)
+
+        payload = _window_json(logs)
+        assert payload["status"] == "failed"
+        assert payload["duration"] > 0
+        assert "upstream reset" in payload["reason"]
+
+    def test_a_failure_before_the_formal_end_leaves_the_window_running(self, logs):
+        """No trustworthy end exists yet, so the orchestrator must decide."""
+        window = _create(logs)
+        window.mark_running(1000.0)
+
+        assert window.fail_at_recorded_boundary("nothing to publish") is False
+        assert _window_json(logs)["status"] == "running"
 
     def test_warmup_invocation_writes_no_window(self, logs, monkeypatch):
         serving = _import_sa_bench_module("benchmark_serving")

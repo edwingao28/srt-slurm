@@ -864,14 +864,12 @@ async def benchmark(
             tasks.append(asyncio.create_task(limited_request_func(request_func_input=request_func_input, pbar=pbar)))
         outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
     except BaseException as exc:
-        if backend == "dynamo" and request_session is not None:
-            # A shared pool must outlive every request using it. Preserve the
-            # historical task behavior when connection reuse is disabled.
+        # Note (wenyao): a shared pool must outlive its requests, and a formal window needs every task settled.
+        if (backend == "dynamo" and request_session is not None) or measurement_window is not None:
             for task in tasks:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            # Note (wenyao): every task has settled, so this end boundary is trustworthy.
             if measurement_window is not None:
                 failed_monotonic = time.perf_counter()
                 measurement_window.mark_failed(
@@ -884,6 +882,12 @@ async def benchmark(
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
     benchmark_end_time_unix = time.time()
+    if measurement_window is not None:
+        measurement_window.record_boundary(
+            start_unix=benchmark_start_time_unix,
+            end_unix=benchmark_end_time_unix,
+            duration=benchmark_duration,
+        )
 
     if slow_down_task is not None and not slow_down_task.done():
         slow_down_task.cancel()
@@ -1267,86 +1271,92 @@ def main(args: argparse.Namespace):
     gc.collect()
     gc.freeze()
 
-    benchmark_result = asyncio.run(
-        run_benchmark_with_cleanup(
-            measurement_window=measurement_window,
-            reuse_http_connections=args.reuse_http_connections,
-            backend=backend,
-            api_url=api_url,
-            base_url=base_url,
-            model_id=model_id,
-            model_name=model_name,
-            tokenizer=tokenizer,
-            input_requests=input_requests,
-            logprobs=args.logprobs,
-            best_of=args.best_of,
-            request_rate=args.request_rate,
-            burstiness=args.burstiness,
-            disable_tqdm=args.disable_tqdm,
-            profile=args.profile,
-            selected_percentile_metrics=args.percentile_metrics.split(","),
-            selected_percentiles=[float(p) for p in args.metric_percentiles.split(",")],
-            ignore_eos=args.ignore_eos,
-            goodput_config_dict=goodput_config_dict,
-            max_concurrency=args.max_concurrency,
-            lora_modules=args.lora_modules,
-            slow_down_servers=args.slow_down_servers,
-            slow_down_sleep_time=args.slow_down_sleep_time,
-            slow_down_wait_time=args.slow_down_wait_time,
-        )
-    )
-
-    # Save config and results to json
-    if args.save_result:
-        result_json: dict[str, Any] = {}
-
-        # Setup
-        current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
-        result_json["date"] = current_dt
-        result_json["backend"] = backend
-        result_json["model_id"] = model_id
-        result_json["tokenizer_id"] = tokenizer_id
-        result_json["best_of"] = args.best_of
-        result_json["num_prompts"] = args.num_prompts
-
-        # Metadata
-        if args.metadata:
-            for item in args.metadata:
-                if "=" in item:
-                    kvstring = item.split("=")
-                    result_json[kvstring[0].strip()] = kvstring[1].strip()
-                else:
-                    raise ValueError("Invalid metadata format. Please use KEY=VALUE format.")
-
-        # Traffic
-        result_json["request_rate"] = args.request_rate if args.request_rate < float("inf") else "inf"
-        result_json["burstiness"] = args.burstiness
-        result_json["max_concurrency"] = args.max_concurrency
-
-        # Merge with benchmark result
-        result_json = {**result_json, **benchmark_result}
-        # Record the effective transport mode after both free-form metadata and
-        # benchmark output so it cannot disagree with this run.
-        result_json["reuse_http_connections"] = args.reuse_http_connections
-
-        # Save to file
-        base_model_id = model_id.split("/")[-1]
-        max_concurrency_str = f"-concurrency{args.max_concurrency}" if args.max_concurrency is not None else ""
-        file_name = f"{backend}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
-        if args.result_filename:
-            file_name = args.result_filename
-        if args.result_dir:
-            file_name = os.path.join(args.result_dir, file_name)
-        with open(file_name, "w", encoding="utf-8") as outfile:
-            json.dump(result_json, outfile)
-        save_to_pytorch_benchmark_format(args, result_json, file_name)
-
-        if measurement_window is not None:
-            measurement_window.mark_completed(
-                start_unix=benchmark_result["benchmark_start_time_unix"],
-                end_unix=benchmark_result["benchmark_end_time_unix"],
-                duration=benchmark_result["duration"],
+    try:
+        benchmark_result = asyncio.run(
+            run_benchmark_with_cleanup(
+                measurement_window=measurement_window,
+                reuse_http_connections=args.reuse_http_connections,
+                backend=backend,
+                api_url=api_url,
+                base_url=base_url,
+                model_id=model_id,
+                model_name=model_name,
+                tokenizer=tokenizer,
+                input_requests=input_requests,
+                logprobs=args.logprobs,
+                best_of=args.best_of,
+                request_rate=args.request_rate,
+                burstiness=args.burstiness,
+                disable_tqdm=args.disable_tqdm,
+                profile=args.profile,
+                selected_percentile_metrics=args.percentile_metrics.split(","),
+                selected_percentiles=[float(p) for p in args.metric_percentiles.split(",")],
+                ignore_eos=args.ignore_eos,
+                goodput_config_dict=goodput_config_dict,
+                max_concurrency=args.max_concurrency,
+                lora_modules=args.lora_modules,
+                slow_down_servers=args.slow_down_servers,
+                slow_down_sleep_time=args.slow_down_sleep_time,
+                slow_down_wait_time=args.slow_down_wait_time,
             )
+        )
+
+        # Save config and results to json
+        if args.save_result:
+            result_json: dict[str, Any] = {}
+
+            # Setup
+            current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
+            result_json["date"] = current_dt
+            result_json["backend"] = backend
+            result_json["model_id"] = model_id
+            result_json["tokenizer_id"] = tokenizer_id
+            result_json["best_of"] = args.best_of
+            result_json["num_prompts"] = args.num_prompts
+
+            # Metadata
+            if args.metadata:
+                for item in args.metadata:
+                    if "=" in item:
+                        kvstring = item.split("=")
+                        result_json[kvstring[0].strip()] = kvstring[1].strip()
+                    else:
+                        raise ValueError("Invalid metadata format. Please use KEY=VALUE format.")
+
+            # Traffic
+            result_json["request_rate"] = args.request_rate if args.request_rate < float("inf") else "inf"
+            result_json["burstiness"] = args.burstiness
+            result_json["max_concurrency"] = args.max_concurrency
+
+            # Merge with benchmark result
+            result_json = {**result_json, **benchmark_result}
+            # Record the effective transport mode after both free-form metadata and
+            # benchmark output so it cannot disagree with this run.
+            result_json["reuse_http_connections"] = args.reuse_http_connections
+
+            # Save to file
+            base_model_id = model_id.split("/")[-1]
+            max_concurrency_str = f"-concurrency{args.max_concurrency}" if args.max_concurrency is not None else ""
+            file_name = f"{backend}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
+            if args.result_filename:
+                file_name = args.result_filename
+            if args.result_dir:
+                file_name = os.path.join(args.result_dir, file_name)
+            with open(file_name, "w", encoding="utf-8") as outfile:
+                json.dump(result_json, outfile)
+            save_to_pytorch_benchmark_format(args, result_json, file_name)
+
+            if measurement_window is not None:
+                measurement_window.mark_completed(
+                    start_unix=benchmark_result["benchmark_start_time_unix"],
+                    end_unix=benchmark_result["benchmark_end_time_unix"],
+                    duration=benchmark_result["duration"],
+                )
+    except BaseException as exc:
+        # Note (wenyao): a failure after the formal end still publishes that unchanged boundary.
+        if measurement_window is not None:
+            measurement_window.fail_at_recorded_boundary("{}: {}".format(type(exc).__name__, exc))
+        raise
 
 
 if __name__ == "__main__":
