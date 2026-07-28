@@ -115,17 +115,21 @@ def read_samples(path: Path) -> tuple[tuple[SampleRow, ...], tuple[str, ...]]:
 
     reasons: list[str] = []
     rows: list[SampleRow] = []
-    with open(path, newline="", encoding="utf-8") as handle:
-        reader = csv.reader(handle)
-        header = next(reader, None)
-        if header != list(SAMPLES_HEADER):
-            return (), (Reason.SAMPLES_CSV_HEADER_MISMATCH,)
-        for raw in reader:
-            row = _parse_row(raw)
-            if row is None:
-                reasons.append(Reason.SAMPLES_CSV_MALFORMED)
-                continue
-            rows.append(row)
+    try:
+        with open(path, newline="", encoding="utf-8") as handle:
+            reader = csv.reader(handle)
+            header = next(reader, None)
+            if header != list(SAMPLES_HEADER):
+                return (), (Reason.SAMPLES_CSV_HEADER_MISMATCH,)
+            for raw in reader:
+                row = _parse_row(raw)
+                if row is None:
+                    reasons.append(Reason.SAMPLES_CSV_MALFORMED)
+                    continue
+                rows.append(row)
+    except (OSError, UnicodeDecodeError, csv.Error):
+        # Note (wenyao): a corrupt byte or oversized field is malformed data, not a crash.
+        reasons.append(Reason.SAMPLES_CSV_MALFORMED)
 
     seen: set[tuple[int, str, int]] = set()
     unique: list[SampleRow] = []

@@ -331,6 +331,25 @@ class TestSampleArtifact:
 
         assert Reason.TIMESTAMP_NON_MONOTONIC in reasons
 
+    def test_invalid_utf8_bytes_are_reported(self, tmp_path):
+        path = tmp_path / SAMPLES_FILENAME
+        path.write_bytes(",".join(SAMPLES_HEADER).encode() + b"\n1,1000.0,0,node-\xff\xfe,0,GPU-aaa,400.0\n")
+
+        rows, reasons = read_samples(path)
+
+        assert rows == ()
+        assert Reason.SAMPLES_CSV_MALFORMED in reasons
+
+    def test_oversized_field_is_reported(self, tmp_path):
+        path = tmp_path / SAMPLES_FILENAME
+        giant = "x" * (csv.field_size_limit() + 1)
+        path.write_text(",".join(SAMPLES_HEADER) + f"\n1,1000.0,0,{giant},0,GPU-aaa,400.0\n")
+
+        rows, reasons = read_samples(path)
+
+        assert rows == ()
+        assert Reason.SAMPLES_CSV_MALFORMED in reasons
+
     def test_header_mismatch_and_missing_file_are_reported(self, tmp_path):
         wrong = tmp_path / "wrong.csv"
         wrong.write_text("timestamp,power\n")
