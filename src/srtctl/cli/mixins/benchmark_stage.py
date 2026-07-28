@@ -9,6 +9,7 @@ Handles benchmark execution and profiling.
 
 import logging
 import shlex
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -17,9 +18,18 @@ from typing import TYPE_CHECKING
 from srtctl.core.fingerprint import format_identity_verification, verify_identity
 from srtctl.core.health import wait_for_model
 from srtctl.core.lockfile import collect_worker_fingerprints
+from srtctl.core.power.contract import (
+    CONTAINER_LOG_DIR,
+    MEASUREMENT_WINDOW_DIR_ENV,
+    WINDOWS_DIRNAME,
+)
+from srtctl.core.schema import TelemetryProvider
 from srtctl.core.slurm import get_hostname_ip, start_srun_process
 from srtctl.core.status import JobStage, JobStatus, StatusReporter
 from srtctl.ports import FRONTEND_PUBLIC_PORT, SGLANG_HTTP_PORT_BASE
+
+_BENCHMARK_TERMINATE_TIMEOUT = 15.0
+_BENCHMARK_KILL_TIMEOUT = 10.0
 
 if TYPE_CHECKING:
     from srtctl.benchmarks.base import BenchmarkRunner
@@ -99,6 +109,23 @@ def _get_health_expectations(
     return logical_prefill, logical_decode, count_desc, logical_prefill + logical_decode
 
 
+def _terminate_and_reap(proc: subprocess.Popen) -> bool:
+    """Terminate, then kill, then confirm the benchmark child was reaped."""
+    proc.terminate()
+    try:
+        proc.wait(timeout=_BENCHMARK_TERMINATE_TIMEOUT)
+        return True
+    except subprocess.TimeoutExpired:
+        logger.warning("Benchmark did not terminate, killing")
+    proc.kill()
+    try:
+        proc.wait(timeout=_BENCHMARK_KILL_TIMEOUT)
+        return True
+    except subprocess.TimeoutExpired:
+        logger.error("Benchmark child was not reaped; measurement windows stay untouched")
+        return False
+
+
 class BenchmarkStageMixin:
     """Mixin for benchmark execution stage.
 
@@ -112,6 +139,7 @@ class BenchmarkStageMixin:
     # Type hints for mixin dependencies
     config: "SrtConfig"
     runtime: "RuntimeContext"
+    benchmark_child_reaped: bool | None = None
 
     @property
     def endpoints(self) -> list["Endpoint"]:
@@ -319,15 +347,22 @@ class BenchmarkStageMixin:
             het_group=self.runtime.nodes.het_group_for(bench_node),
         )
 
+        # Note (wenyao): the SIGTERM handler raises SystemExit, so only a finally can guarantee the child is reaped.
+        self.benchmark_child_reaped = False
         try:
             while proc.poll() is None:
                 if stop_event.is_set():
                     logger.info("Stop requested, terminating benchmark")
-                    proc.terminate()
                     return 1
                 time.sleep(1)
+            self.benchmark_child_reaped = True
             return proc.returncode or 0
         finally:
+            if proc.poll() is None:
+                self.benchmark_child_reaped = _terminate_and_reap(proc)
+            elif self.benchmark_child_reaped is False:
+                proc.wait()
+                self.benchmark_child_reaped = True
             if snapshotter is not None:
                 snapshotter.stop()
 
@@ -453,6 +488,17 @@ class BenchmarkStageMixin:
             "SA_BENCH_SLOW_DOWN_WAIT_TIME": str(b.slow_down_wait_time),
         }
 
+    def _get_measurement_window_env(self) -> dict[str, str]:
+        """Point SA-Bench at the power artifact's windows directory.
+
+        ``runtime.log_dir`` is already mounted at ``/logs``, so the container
+        path and the host path the collector reads are the same directory.
+        """
+        telemetry = self.config.telemetry
+        if not telemetry.enabled or telemetry.provider != TelemetryProvider.DCGM_POWER:
+            return {}
+        return {MEASUREMENT_WINDOW_DIR_ENV: f"{CONTAINER_LOG_DIR}/{telemetry.storage_subdir}/{WINDOWS_DIRNAME}"}
+
     def _get_aiperf_server_metrics_env(
         self,
         logical_endpoints: list[tuple[str, str, int]] | None = None,
@@ -530,6 +576,7 @@ class BenchmarkStageMixin:
 
         if runner.name == "SA-Bench":
             env.update(self._get_sa_bench_slow_down_env())
+            env.update(self._get_measurement_window_env())
 
         # Built-in AIPerf runners retain physical-process metrics for vLLM DP.
         # Custom commands commonly wrap AIPerf but do not inherit from its base

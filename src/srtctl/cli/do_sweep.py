@@ -712,9 +712,10 @@ class SweepOrchestrator(
             for proc in frontend_procs:
                 registry.add_process(proc)
 
-            telemetry_procs = self.start_telemetry()
-            for proc in telemetry_procs:
-                registry.add_process(proc)
+            if self.start_power_telemetry(registry) is None:
+                telemetry_procs = self.start_telemetry()
+                for proc in telemetry_procs:
+                    registry.add_process(proc)
 
             self._print_connection_info()
 
@@ -726,6 +727,10 @@ class SweepOrchestrator(
                     logger.error("Eval-only evaluation failed with exit code %d", exit_code)
                 else:
                     logger.info("Eval-only evaluation completed successfully")
+            elif self.power_telemetry_blocks_benchmark():
+                logger.error("Required power telemetry failed startup - skipping the formal benchmark")
+                reporter.report(JobStatus.FAILED, JobStage.BENCHMARK, "Required power telemetry failed startup")
+                exit_code = 1
             else:
                 # Stage 4: Benchmark (status reported AFTER health check passes)
                 exit_code = self.run_benchmark(registry, stop_event, reporter)
@@ -747,6 +752,8 @@ class SweepOrchestrator(
 
         finally:
             logger.info("Cleanup")
+            # Note (wenyao): finalize before registry.cleanup() so samples and manifest are durable.
+            exit_code = self.finalize_power_telemetry(exit_code, interrupted=stop_event.is_set())
             stop_event.set()
             registry.cleanup()
             if exit_code != 0:
