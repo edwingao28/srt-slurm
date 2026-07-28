@@ -51,6 +51,7 @@ class MeasurementWindow:
         self.path = path
         self.result_path = result_path
         self.concurrency = concurrency
+        self._boundary = None
 
     @classmethod
     def create(
@@ -112,3 +113,20 @@ class MeasurementWindow:
     def mark_failed(self, *, start_unix, end_unix, duration, reason):
         """Keep a trustworthy boundary that produced no publishable result."""
         self._write(STATUS_FAILED, start_unix, end_unix, duration, reason)
+
+    def record_boundary(self, *, start_unix, end_unix, duration):
+        """Remember the formal boundary so a later failure can still publish it."""
+        self._boundary = (start_unix, end_unix, duration)
+
+    def fail_at_recorded_boundary(self, reason):
+        """Write ``failed`` using the captured boundary, if one was established.
+
+        Returns False when no trustworthy end exists yet, in which case the
+        window stays ``running`` for the orchestrator to convert to
+        ``interrupted`` — the boundary is never invented.
+        """
+        if self._boundary is None:
+            return False
+        start_unix, end_unix, duration = self._boundary
+        self.mark_failed(start_unix=start_unix, end_unix=end_unix, duration=duration, reason=reason)
+        return True
