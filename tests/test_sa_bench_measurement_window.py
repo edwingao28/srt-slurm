@@ -12,6 +12,7 @@ import json
 import sys
 import time
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -23,7 +24,10 @@ from srtctl.core.power.samples import SampleRow, derive_observed_devices
 from srtctl.core.power.windows import convert_running_windows, validate_expected_windows
 from srtctl.core.schema import (
     BenchmarkConfig,
+    FrontendConfig,
     ModelConfig,
+    ProfilingConfig,
+    ProfilingPhaseConfig,
     ResourceConfig,
     SrtConfig,
     TelemetryConfig,
@@ -862,6 +866,55 @@ class TestArtifactErrors:
 
         assert harness.runtime.container_mounts[tmp_path] == Path("/logs")
         assert (tmp_path / "power" / WINDOWS_DIRNAME / "probe.json").exists()
+
+    def test_sa_bench_env_keeps_window_after_logical_endpoint_refactor(self, tmp_path):
+        """One benchmark env must carry logical endpoints, slow_down, and the window dir together."""
+        harness = _benchmark_harness(tmp_path, provider="dcgm-power")
+        harness.config = SrtConfig(
+            name="test",
+            model=ModelConfig(path="/model", container="/image", precision="fp8"),
+            resources=ResourceConfig(
+                gpu_type="gb200",
+                prefill_nodes=1,
+                decode_nodes=1,
+                prefill_workers=1,
+                decode_workers=1,
+            ),
+            benchmark=BenchmarkConfig(
+                type="sa-bench",
+                concurrencies=[4],
+                isl=8192,
+                osl=1024,
+                slow_down_sleep_time=1.0,
+                slow_down_wait_time=1.0,
+            ),
+            telemetry=harness.config.telemetry,
+            frontend=FrontendConfig(type="sglang"),
+            profiling=ProfilingConfig(
+                type="nsys",
+                prefill=ProfilingPhaseConfig(start_step=1, stop_step=2),
+                decode=ProfilingPhaseConfig(start_step=1, stop_step=2),
+            ),
+        )
+        processes = [
+            SimpleNamespace(is_leader=True, endpoint_mode="decode", node="node-d", http_port=1234, sys_port=0)
+        ]
+        harness.runtime.environment = {}
+        harness.runtime.network_interface = "eth0"
+        runner = SimpleNamespace(name="SA-Bench")
+
+        with (
+            patch.object(BenchmarkStageMixin, "backend_processes", processes),
+            patch(
+                "srtctl.cli.mixins.benchmark_stage.get_hostname_ip",
+                side_effect=lambda node, _interface: node if isinstance(node, str) else "head",
+            ),
+        ):
+            env = harness._get_benchmark_env(runner)
+
+        assert env["PROFILE_DECODE_ENDPOINTS"] == "node-d:1234"
+        assert env["SA_BENCH_SLOW_DOWN_URLS"] == "http://node-d:1234"
+        assert env["SRT_MEASUREMENT_WINDOW_DIR"] == "/logs/power/windows"
 
     def test_bench_script_saves_results_only_for_the_formal_run(self):
         script = (SA_BENCH_DIR / "bench.sh").read_text()
