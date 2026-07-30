@@ -24,6 +24,7 @@ from srtctl.core.config import (
     generate_override_configs,
     resolve_config_with_defaults,
 )
+from srtctl.core.schema import TelemetryProvider
 
 if TYPE_CHECKING:
     from srtctl.core.schema import SrtConfig
@@ -291,7 +292,12 @@ def _preflight_telemetry(
     raw_telemetry = raw_config.get("telemetry") or {}
     issues: list[PreflightIssue] = []
 
-    for field, path in _TELEMETRY_IMAGE_FIELDS:
+    # Note (wenyao): dcgm-power launches only the exporter, so the other images are never referenced.
+    fields = _TELEMETRY_IMAGE_FIELDS
+    if telemetry.get("provider") == TelemetryProvider.DCGM_POWER.value:
+        fields = tuple(field for field in fields if field[1][0] == "dcgm_exporter")
+
+    for field, path in fields:
         resolved_value: Any = telemetry
         raw_value: Any = raw_telemetry
         for key in path:
@@ -299,6 +305,9 @@ def _preflight_telemetry(
             raw_value = (raw_value or {}).get(key) if isinstance(raw_value, dict) else None
         if not resolved_value:
             continue  # schema-level validator handles required-when-enabled
+        # Note (wenyao): a registry URI is pulled at srun time, so there is no local file to stat.
+        if "://" in str(resolved_value):
+            continue
 
         ok, _ = _check_path(_expand_path(resolved_value), expect="file")
         if ok:
