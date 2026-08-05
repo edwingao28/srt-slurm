@@ -15,12 +15,13 @@ import builtins
 import hashlib
 import itertools
 import logging
+import math
 import os
 import shlex
 from collections.abc import Iterator, Mapping
 from dataclasses import field
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import (
     Annotated,
     Any,
@@ -43,13 +44,23 @@ from srtctl.core.formatting import (
     FormattablePath,
     FormattablePathField,
 )
-from srtctl.core.power.contract import (
-    BENCHMARK_TYPE_SA_BENCH,
-    is_finite_positive,
-    is_safe_relative_subpath,
-)
-
 logger = logging.getLogger(__name__)
+
+# Local copies of srtctl.core.power.contract values so that loading a config
+# never imports the power package; equality is pinned by tests.
+_BENCHMARK_TYPE_SA_BENCH = "sa-bench"
+_DCGM_POWER_MAX_SAMPLE_GAP_SECONDS = 3.0
+
+
+def _is_safe_relative_subpath(value: str) -> bool:
+    if not value or value.startswith(("/", "~")):
+        return False
+    parts = PurePosixPath(value).parts
+    return bool(parts) and not any(part in ("..", "") for part in parts)
+
+
+def _is_finite_positive(value: float) -> bool:
+    return math.isfinite(value) and value > 0
 
 
 # ============================================================================
@@ -1849,10 +1860,17 @@ class SrtConfig:
             raise ValidationError("telemetry.dcgm_exporter.port must be in 1..65535")
 
         for name in ("default_frequency", "startup_timeout_seconds", "request_timeout_seconds"):
-            if not is_finite_positive(getattr(telemetry, name)):
+            if not _is_finite_positive(getattr(telemetry, name)):
                 raise ValidationError(f"telemetry.{name} must be finite and positive")
+        if telemetry.default_frequency > _DCGM_POWER_MAX_SAMPLE_GAP_SECONDS:
+            raise ValidationError(
+                f"telemetry.default_frequency={telemetry.default_frequency} exceeds the "
+                f"{_DCGM_POWER_MAX_SAMPLE_GAP_SECONDS}s max sample gap the power validator accepts; "
+                "every window would fail sample_gap_exceeded. Set it to the intended collector "
+                "period (e.g. 1.0)."
+            )
         if (
-            not is_finite_positive(telemetry.collector_join_timeout_seconds)
+            not _is_finite_positive(telemetry.collector_join_timeout_seconds)
             or telemetry.collector_join_timeout_seconds <= telemetry.request_timeout_seconds
         ):
             raise ValidationError(
@@ -1860,11 +1878,11 @@ class SrtConfig:
                 "and greater than telemetry.request_timeout_seconds"
             )
 
-        if not is_safe_relative_subpath(telemetry.storage_subdir):
+        if not _is_safe_relative_subpath(telemetry.storage_subdir):
             raise ValidationError("telemetry.storage_subdir must be a safe relative path below the run log directory")
 
-        if self.benchmark.type != BENCHMARK_TYPE_SA_BENCH:
-            raise ValidationError(f"telemetry provider dcgm-power requires benchmark.type: {BENCHMARK_TYPE_SA_BENCH}")
+        if self.benchmark.type != _BENCHMARK_TYPE_SA_BENCH:
+            raise ValidationError(f"telemetry provider dcgm-power requires benchmark.type: {_BENCHMARK_TYPE_SA_BENCH}")
         if self.benchmark.client_placement != "head":
             raise ValidationError("telemetry provider dcgm-power requires benchmark.client_placement: head")
 

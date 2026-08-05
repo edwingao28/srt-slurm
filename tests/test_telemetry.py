@@ -123,6 +123,7 @@ class TestDcgmPowerConfig:
             ({"default_frequency": 0.0}, None, "default_frequency"),
             ({"default_frequency": float("nan")}, None, "default_frequency"),
             ({"default_frequency": float("inf")}, None, "default_frequency"),
+            ({"default_frequency": 3.5}, None, "sample_gap_exceeded"),
             ({"startup_timeout_seconds": 0.0}, None, "startup_timeout_seconds"),
             ({"request_timeout_seconds": -1.0}, None, "request_timeout_seconds"),
             ({"collector_join_timeout_seconds": 2.0}, None, "collector_join_timeout_seconds"),
@@ -146,6 +147,28 @@ class TestDcgmPowerConfig:
                 telemetry=_dcgm_power(**telemetry_overrides),
                 benchmark=benchmark or _sa_bench(),
             )
+
+    def test_the_shared_default_frequency_is_rejected_for_dcgm_power(self):
+        telemetry = TelemetryConfig(
+            enabled=True,
+            provider=TelemetryProvider.DCGM_POWER,
+            storage_subdir="power",
+            required=True,
+            startup_timeout_seconds=30.0,
+            request_timeout_seconds=2.0,
+            collector_join_timeout_seconds=10.0,
+            dcgm_exporter=TelemetryExporterConfig(container_image="dcgm-exporter", port=9401),
+        )
+        assert telemetry.default_frequency == 5.0
+        with pytest.raises(ValidationError, match="sample_gap_exceeded"):
+            _make_config(telemetry=telemetry, benchmark=_sa_bench())
+
+    def test_schema_constant_copies_match_the_power_contract(self):
+        from srtctl.core import schema as schema_module
+        from srtctl.core.power import contract
+
+        assert schema_module._BENCHMARK_TYPE_SA_BENCH == contract.BENCHMARK_TYPE_SA_BENCH
+        assert schema_module._DCGM_POWER_MAX_SAMPLE_GAP_SECONDS == contract.MAX_SAMPLE_GAP_SECONDS
 
     def test_dedicated_infra_node_is_rejected(self):
         with pytest.raises(ValidationError, match="etcd_nats_dedicated_node"):
