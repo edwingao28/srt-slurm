@@ -332,6 +332,64 @@ class TestTelemetryStageMixin:
         assert (tmp_path / "telemetry" / "local").exists()
         assert mock_srun.call_count == 3
 
+    @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
+    @patch("srtctl.cli.mixins.telemetry_stage.generate_telemetry_config", return_value='storage = "/logs/telemetry"\n')
+    def test_multinode_exporters_request_one_node_per_task(self, _mock_config, mock_srun, tmp_path):
+        """srun rejects --nodes 1 with a longer --nodelist, so the exporter launch
+        must size --nodes to the worker set."""
+
+        class Harness(TelemetryStageMixin):
+            def __init__(self):
+                self.config = _make_config(
+                    telemetry=TelemetryConfig(
+                        enabled=True,
+                        container_image="telemetry:latest",
+                        dcgm_exporter=TelemetryExporterConfig(container_image="dcgm:latest", port=9401),
+                        node_exporter=TelemetryExporterConfig(container_image="node:latest", port=9101),
+                    )
+                )
+                self.runtime = MagicMock()
+                self.runtime.log_dir = tmp_path
+                self.runtime.nodes.head = "node-a"
+                self.runtime.nodes.het = False
+                self.runtime.srun_options = {}
+                self.runtime.container_mounts = {Path(tmp_path): Path("/logs")}
+                self._backend_processes = [
+                    Process(
+                        node=node,
+                        gpu_indices=frozenset({0}),
+                        sys_port=8081,
+                        http_port=30000,
+                        endpoint_mode="agg",
+                        endpoint_index=index,
+                        node_rank=index,
+                    )
+                    for index, node in enumerate(["node-a", "node-b"])
+                ]
+
+            @property
+            def backend_processes(self):
+                return self._backend_processes
+
+            def _compute_frontend_topology(self):
+                return FrontendTopology(
+                    nginx_node=None,
+                    frontend_nodes=["node-a"],
+                    frontend_port=8000,
+                    public_port=8000,
+                )
+
+        mock_srun.return_value = _running_exporter()
+        harness = Harness()
+
+        harness.start_telemetry()
+
+        exporter_calls = [call for call in mock_srun.call_args_list if call.kwargs.get("nodelist") == ["node-a", "node-b"]]
+        assert len(exporter_calls) == 2
+        for call in exporter_calls:
+            assert call.kwargs["nodes"] == 2
+            assert call.kwargs["ntasks"] == 2
+
 
 def _running_exporter():
     """A just-launched srun process: still running, so poll() is None."""
