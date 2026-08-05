@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -33,6 +32,7 @@ from srtctl.core.power.contract import (
     SAMPLES_FILENAME,
     SCHEMA_VERSION,
     STARTUP_FAILURE_REASONS,
+    is_finite_number,
 )
 from srtctl.core.power.manifest import STATUS_COMPLETE, ArtifactError, ExpectedWindow
 from srtctl.core.power.samples import derive_observed_devices, read_samples
@@ -156,12 +156,13 @@ def _check_wire_contract(manifest: dict[str, Any]) -> list[str]:
     if status != STATUS_COMPLETE:
         failures.append(f"status is {status!r}, expected {STATUS_COMPLETE!r}")
 
-    if not _is_finite_number(manifest.get("started_at_unix")):
+    if not is_finite_number(manifest.get("started_at_unix")):
         failures.append("started_at_unix is not a finite number")
-    if not _is_finite_number(manifest.get("stopped_at_unix")):
+    if not is_finite_number(manifest.get("stopped_at_unix")):
         failures.append("stopped_at_unix is not finite in a terminal manifest")
     for key in ("sample_interval_seconds", "request_timeout_seconds"):
-        if not _is_positive_finite_number(manifest.get(key)):
+        value = manifest.get(key)
+        if not (is_finite_number(value) and value > 0):
             failures.append(f"{key} is not finite and positive")
     for key in ("scrape_count", "sample_row_count"):
         value = manifest.get(key)
@@ -240,14 +241,6 @@ def _check_stored_evidence(
             failures.append(f"{label} contains duplicate keys")
 
     return failures
-
-
-def _is_finite_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-
-
-def _is_positive_finite_number(value: Any) -> bool:
-    return _is_finite_number(value) and value > 0
 
 
 def _text(value: Any, label: str) -> str:

@@ -16,6 +16,7 @@ from srtctl.core.power.contract import (
     POWER_UNIT,
     PRODUCER,
     SCHEMA_VERSION,
+    dedupe,
 )
 from srtctl.core.power.samples import ObservedDevice
 from srtctl.core.power.topology import ExpectedDevice
@@ -160,5 +161,5 @@ class PowerManifest:
             "sample_row_count": self.sample_row_count,
             "window_validations": [validation.to_dict() for validation in self.window_validations],
             "artifact_errors": [error.to_dict() for error in self.artifact_errors],
-            "reason_codes": list(dict.fromkeys(self.reason_codes)),
+            "reason_codes": list(dedupe(self.reason_codes)),
         }

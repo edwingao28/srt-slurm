@@ -13,7 +13,6 @@ from __future__ import annotations
 import itertools
 import json
 import logging
-import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +25,7 @@ from srtctl.core.power.contract import (
     Reason,
     atomic_write_json,
     dedupe,
+    is_finite_number,
     is_safe_relative_subpath,
 )
 from srtctl.core.power.manifest import ArtifactError, ExpectedWindow, WindowValidation
@@ -34,12 +34,12 @@ from srtctl.core.power.topology import DeviceKey
 
 logger = logging.getLogger(__name__)
 
-STATUS_RUNNING = "running"
-STATUS_COMPLETED = "completed"
-STATUS_FAILED = "failed"
-STATUS_INTERRUPTED = "interrupted"
+WINDOW_STATUS_RUNNING = "running"
+WINDOW_STATUS_COMPLETED = "completed"
+WINDOW_STATUS_FAILED = "failed"
+WINDOW_STATUS_INTERRUPTED = "interrupted"
 
-_ALLOWED_STATUSES = (STATUS_RUNNING, STATUS_COMPLETED, STATUS_FAILED, STATUS_INTERRUPTED)
+_ALLOWED_STATUSES = (WINDOW_STATUS_RUNNING, WINDOW_STATUS_COMPLETED, WINDOW_STATUS_FAILED, WINDOW_STATUS_INTERRUPTED)
 
 _CLOCK_TOLERANCE_SECONDS = 0.5
 _CLOCK_TOLERANCE_FRACTION = 0.01
@@ -112,9 +112,9 @@ def convert_running_windows(windows_dir: Path, *, reason: str) -> int:
             payload = json.loads(path.read_text())
         except (OSError, ValueError):
             continue
-        if not isinstance(payload, dict) or payload.get("status") != STATUS_RUNNING:
+        if not isinstance(payload, dict) or payload.get("status") != WINDOW_STATUS_RUNNING:
             continue
-        payload["status"] = STATUS_INTERRUPTED
+        payload["status"] = WINDOW_STATUS_INTERRUPTED
         payload["benchmark_end_time_unix"] = None
         payload["duration"] = None
         payload["reason"] = reason
@@ -187,7 +187,7 @@ def _parse(path: Path, relative: str, result_root: Path) -> tuple[_ParsedWindow 
         or status not in _ALLOWED_STATUSES
         or not isinstance(benchmark_type, str)
         or not isinstance(concurrency, int)
-        or not _is_finite(start)
+        or not is_finite_number(start)
     ):
         return None, (Reason.MEASUREMENT_WINDOW_MALFORMED,)
 
@@ -224,13 +224,13 @@ def _status_invariants_hold(status: str, end, duration, reason) -> bool:
     reason; ``interrupted`` is only ever produced by the orchestrator, which
     always records why.
     """
-    if status == STATUS_RUNNING:
+    if status == WINDOW_STATUS_RUNNING:
         return end is None and duration is None and reason is None
-    if status == STATUS_INTERRUPTED:
+    if status == WINDOW_STATUS_INTERRUPTED:
         return end is None and duration is None and isinstance(reason, str) and bool(reason)
-    if not _is_finite(end) or not _is_finite(duration) or duration <= 0:
+    if not is_finite_number(end) or not is_finite_number(duration) or duration <= 0:
         return False
-    if status == STATUS_COMPLETED:
+    if status == WINDOW_STATUS_COMPLETED:
         return reason is None
     return isinstance(reason, str) and bool(reason)
 
@@ -255,20 +255,22 @@ def _validate_one(
         )
 
     reasons: list[str] = []
-    if window.status != STATUS_COMPLETED:
+    if window.status != WINDOW_STATUS_COMPLETED:
         reasons.append(Reason.MEASUREMENT_WINDOW_INCOMPLETE)
     else:
         reasons.extend(_check_result(window, result_root))
 
     gaps: dict[str, float] = {}
     if not reasons:
-        assert window.end_unix is not None
-        gaps, coverage_reasons = _check_coverage(
-            window.start_unix, window.end_unix, expected_device_keys, observed_devices
-        )
-        reasons.extend(coverage_reasons)
-        if coverage_reasons:
-            gaps = {}
+        if window.end_unix is None:
+            reasons.append(Reason.MEASUREMENT_WINDOW_MALFORMED)
+        else:
+            gaps, coverage_reasons = _check_coverage(
+                window.start_unix, window.end_unix, expected_device_keys, observed_devices
+            )
+            reasons.extend(coverage_reasons)
+            if coverage_reasons:
+                gaps = {}
 
     return WindowValidation(
         benchmark_type=expected.benchmark_type,
@@ -292,7 +294,8 @@ def _check_result(window: _ParsedWindow, result_root: Path) -> list[str]:
     if not isinstance(result, dict):
         return [Reason.MEASUREMENT_WINDOW_RESULT_MISMATCH]
 
-    assert window.end_unix is not None and window.duration is not None
+    if window.end_unix is None or window.duration is None:
+        return [Reason.MEASUREMENT_WINDOW_MALFORMED]
     if (
         result.get("benchmark_start_time_unix") != window.start_unix
         or result.get("benchmark_end_time_unix") != window.end_unix
@@ -347,10 +350,6 @@ def _bracketing_sequence(times: Sequence[float], start: float, end: float) -> li
         return None
     inside = [value for value in times if start < value < end]
     return [before[-1], *inside, after[0]]
-
-
-def _is_finite(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _stays_below(root: Path, relative: str) -> bool:

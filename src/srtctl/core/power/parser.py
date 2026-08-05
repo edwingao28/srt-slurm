@@ -11,7 +11,7 @@ because the collector already knows which allocated node it polled.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from prometheus_client.parser import text_string_to_metric_families
 
@@ -34,7 +34,7 @@ class ParsedScrape:
     """Readings that may be persisted, plus why anything was dropped."""
 
     readings: tuple[PowerReading, ...] = ()
-    reason_codes: tuple[str, ...] = field(default=())
+    reason_codes: tuple[str, ...] = ()
 
 
 def parse_power_scrape(text: str) -> ParsedScrape:

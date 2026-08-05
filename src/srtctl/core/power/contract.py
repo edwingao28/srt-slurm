@@ -71,7 +71,6 @@ class Reason:
     COLLECTOR_INTERRUPTED = "collector_interrupted"
     COLLECTOR_JOIN_TIMEOUT = "collector_join_timeout"
     BENCHMARK_CHILD_REAP_TIMEOUT = "benchmark_child_reap_timeout"
-    FINAL_SCRAPE_UNAVAILABLE = "final_scrape_unavailable"
     MEASUREMENT_WINDOW_MISSING = "measurement_window_missing"
     MEASUREMENT_WINDOW_UNEXPECTED = "measurement_window_unexpected"
     MEASUREMENT_WINDOW_DUPLICATE = "measurement_window_duplicate"
@@ -115,9 +114,9 @@ def is_safe_relative_subpath(value: str) -> bool:
     return bool(parts) and not any(part in ("..", "") for part in parts)
 
 
-def is_finite_positive(value: float) -> bool:
-    """Whether ``value`` is a finite number greater than zero."""
-    return math.isfinite(value) and value > 0
+def is_finite_number(value: Any) -> bool:
+    """Whether ``value`` is a finite real number; bools are not numbers here."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def dedupe(values: list[str]) -> tuple[str, ...]:
@@ -125,21 +124,16 @@ def dedupe(values: list[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(values))
 
 
-def atomic_write_text(path: Path, text: str) -> None:
-    """Replace ``path`` with ``text`` and leave no partial file behind."""
+def atomic_write_json(path: Path, payload: Any) -> None:
+    """Replace ``path`` with serialized JSON and leave no partial file behind."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", text=True)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
+            handle.write(json.dumps(payload, indent=2, sort_keys=False) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, path)
     except BaseException:
         Path(temp_path).unlink(missing_ok=True)
         raise
-
-
-def atomic_write_json(path: Path, payload: Any) -> None:
-    """Atomically serialize ``payload`` as JSON."""
-    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=False) + "\n")
