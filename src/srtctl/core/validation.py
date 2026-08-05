@@ -295,7 +295,7 @@ def _preflight_telemetry(
     raw_telemetry = raw_config.get("telemetry") or {}
     issues: list[PreflightIssue] = []
 
-    # Note (wenyao): dcgm-power launches only the exporter, so the other images are never referenced.
+    # NOTE: dcgm-power launches only the exporter, so the other images are never referenced.
     fields = _TELEMETRY_IMAGE_FIELDS
     if telemetry.get("provider") == TelemetryProvider.DCGM_POWER.value:
         fields = tuple(field for field in fields if field[1][0] == "dcgm_exporter")
@@ -308,7 +308,7 @@ def _preflight_telemetry(
             raw_value = (raw_value or {}).get(key) if isinstance(raw_value, dict) else None
         if not resolved_value:
             continue  # schema-level validator handles required-when-enabled
-        # Note (wenyao): a registry URI is pulled at srun time, so there is no local file to stat.
+        # NOTE: a registry URI is pulled at srun time, so there is no local file to stat.
         if _is_registry_uri(str(resolved_value)):
             continue
 

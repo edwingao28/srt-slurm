@@ -128,7 +128,7 @@ def read_samples(path: Path) -> tuple[tuple[SampleRow, ...], tuple[str, ...]]:
                     continue
                 rows.append(row)
     except (OSError, UnicodeDecodeError, csv.Error):
-        # Note (wenyao): a corrupt byte or oversized field is malformed data, not a crash.
+        # NOTE: a corrupt byte or oversized field is malformed data, not a crash.
         reasons.append(Reason.SAMPLES_CSV_MALFORMED)
 
     seen: set[tuple[int, str, int]] = set()

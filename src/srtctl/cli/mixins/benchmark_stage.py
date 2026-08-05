@@ -330,7 +330,7 @@ class BenchmarkStageMixin:
             het_group=self.runtime.nodes.het_group_for(bench_node),
         )
 
-        # Note (wenyao): the SIGTERM handler raises SystemExit, so only a finally can guarantee the child is reaped.
+        # NOTE: the SIGTERM handler raises SystemExit, so only a finally can guarantee the child is reaped.
         self.benchmark_child_reaped = False
         try:
             while proc.poll() is None:

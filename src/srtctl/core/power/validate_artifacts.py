@@ -171,12 +171,12 @@ def _check_wire_contract(manifest: dict[str, Any]) -> list[str]:
     if not isinstance(required, bool):
         failures.append(f"required is {required!r}, expected a boolean")
 
-    # Note (wenyao): item types are checked before the set op, or a non-hashable entry raises.
+    # NOTE: item types are checked before the set op, or a non-hashable entry raises.
     reasons = manifest.get("reason_codes")
     if not isinstance(reasons, list) or not all(isinstance(reason, str) for reason in reasons):
         failures.append("reason_codes is not a list of strings")
     else:
-        # Note (wenyao): startup reasons block `complete` only in required mode, mirroring _terminal_status.
+        # NOTE: startup reasons block `complete` only in required mode, mirroring _terminal_status.
         blocking = set(FATAL_LIFECYCLE_REASONS)
         if required is True:
             blocking |= set(STARTUP_FAILURE_REASONS)
@@ -215,7 +215,7 @@ def _check_stored_evidence(
     if stored_rows != len(rows):
         failures.append(f"sample_row_count is {stored_rows!r}, disk has {len(rows)} rows")
 
-    # Note (wenyao): trailing empty cycles may exceed max(scrape_seq)+1, but can never fall below it.
+    # NOTE: trailing empty cycles may exceed max(scrape_seq)+1, but can never fall below it.
     stored_scrapes = manifest.get("scrape_count")
     if rows:
         least = max(row.scrape_seq for row in rows) + 1

@@ -122,7 +122,7 @@ def validate_devices(
         reasons.append(Reason.EXPECTED_DEVICE_MISSING)
     if observed_keys - expected_keys:
         reasons.append(Reason.UNEXPECTED_DEVICE)
-    # Note (wenyao): a UUID must map 1:1 to a device key, or one physical GPU is counted twice.
+    # NOTE: a UUID must map 1:1 to a device key, or one physical GPU is counted twice.
     if any(len(device.gpu_uuids) != 1 for device in observed):
         reasons.append(Reason.GPU_UUID_CHANGED)
     else:

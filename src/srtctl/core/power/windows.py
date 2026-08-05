@@ -134,7 +134,7 @@ def _scan(
     if not windows_dir.is_dir():
         return parsed, duplicates
 
-    # Note (wenyao): rejecting only child symlinks still lets the whole directory be one.
+    # NOTE: rejecting only child symlinks still lets the whole directory be one.
     if not _stays_below(windows_dir.parent, WINDOWS_DIRNAME):
         artifact_errors.append(
             ArtifactError(path=WINDOWS_DIRNAME, reason_codes=(Reason.MEASUREMENT_WINDOW_ARTIFACT_PATH_INVALID,))
@@ -326,7 +326,7 @@ def _check_coverage(
         if device is None:
             reasons.append(Reason.MEASUREMENT_WINDOW_NOT_BRACKETED)
             continue
-        # Note (wenyao): a changed UUID cannot be attributed to one GPU, so this window's coverage is unusable.
+        # NOTE: a changed UUID cannot be attributed to one GPU, so this window's coverage is unusable.
         if len(device.gpu_uuids) != 1:
             reasons.append(Reason.GPU_UUID_CHANGED)
             continue

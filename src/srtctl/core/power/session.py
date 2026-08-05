@@ -121,7 +121,7 @@ class PowerTelemetrySession:
         self._endpoints: list[PowerEndpoint] = list(endpoints) if endpoints is not None else []
         self._endpoints_resolved = endpoints is not None
 
-        # Note (wenyao): only _writer_lock is held across I/O, so only it needs a timed acquire at shutdown.
+        # NOTE: only _writer_lock is held across I/O, so only it needs a timed acquire at shutdown.
         self._writer_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._exporters_lock = threading.Lock()
@@ -282,7 +282,7 @@ class PowerTelemetrySession:
             with results_lock:
                 results.append(result)
 
-        # Note (wenyao): requests applies its timeout to connect and read separately, so an endpoint can take 2x.
+        # NOTE: requests applies its timeout to connect and read separately, so an endpoint can take 2x.
         deadline = time.monotonic() + 2 * self._settings.request_timeout_seconds + 1.0
         failures = _run_daemon_workers(
             [(f"PowerScrape-{endpoint.hostname}", poll, endpoint) for endpoint in endpoints],
@@ -399,7 +399,7 @@ class PowerTelemetrySession:
                 self.record_reason(Reason.COLLECTOR_JOIN_TIMEOUT)
         if interrupted:
             self.record_reason(Reason.COLLECTOR_INTERRUPTED)
-        # Note (wenyao): the pre-stop poll cannot see an exporter that died during the final scrape.
+        # NOTE: the pre-stop poll cannot see an exporter that died during the final scrape.
         if self._any_exporter_exited():
             self.record_reason(Reason.EXPORTER_EXITED)
 
@@ -464,7 +464,7 @@ class PowerTelemetrySession:
             artifact_errors=self._manifest.artifact_errors,
         )
         reasons.extend(reason for validation in self._manifest.window_validations for reason in validation.reason_codes)
-        # Note (wenyao): an unusable artifact file is itself a publication gate, not something to ignore.
+        # NOTE: an unusable artifact file is itself a publication gate, not something to ignore.
         reasons.extend(reason for error in self._manifest.artifact_errors for reason in error.reason_codes)
 
         status = self._terminal_status(reasons)
@@ -495,7 +495,7 @@ class PowerTelemetrySession:
         )
 
     def _exit_nonzero(self, reasons: Sequence[str], publication_valid: bool = False) -> bool:
-        """Spec §8: measurement invalidity is mode-dependent, operational failure is not.
+        """Measurement invalidity is mode-dependent; operational failure is not.
 
         Best-effort telemetry never turns a passing benchmark into a failure,
         but something left live or unreaped fails the job in either mode.

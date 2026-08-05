@@ -1080,7 +1080,7 @@ class TelemetryConfig:
     """
 
     enabled: bool = False
-    # Note (wenyao): without by_value the schema accepts only enum member names, not "dcgm-power".
+    # NOTE: without by_value the schema accepts only enum member names, not "dcgm-power".
     provider: Annotated[TelemetryProvider, fields.Enum(TelemetryProvider, by_value=True)] = TelemetryProvider.SCRAPER
     container_image: str | None = None
     binary_path: str = "/usr/local/bin/telemetry-scraper"
@@ -1886,7 +1886,7 @@ class SrtConfig:
         if self.benchmark.client_placement != "head":
             raise ValidationError("telemetry provider dcgm-power requires benchmark.client_placement: head")
 
-        # Note (wenyao): a dedicated infra node moves nodes.head off the batch host the collector runs on.
+        # NOTE: a dedicated infra node moves nodes.head off the batch host the collector runs on.
         if self.infra.etcd_nats_dedicated_node:
             raise ValidationError(
                 "telemetry provider dcgm-power requires infra.etcd_nats_dedicated_node: false, because a "

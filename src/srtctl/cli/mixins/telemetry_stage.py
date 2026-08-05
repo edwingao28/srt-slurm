@@ -179,7 +179,7 @@ class TelemetryStageMixin:
             ],
             nodes=worker_nodes,
         )
-        # Note (wenyao): stored before initialize() so a raise mid-startup still leaves a finalizable session.
+        # NOTE: stored before initialize() so a raise mid-startup still leaves a finalizable session.
         self._power_session = session
         self._power_telemetry_ready = False
         session.initialize()
@@ -221,7 +221,7 @@ class TelemetryStageMixin:
         session = getattr(self, "_power_session", None)
         if session is None:
             return False
-        # Note (wenyao): fail closed, so only proven readiness clears the gate.
+        # NOTE: fail closed, so only proven readiness clears the gate.
         if getattr(self, "_power_telemetry_ready", False):
             return False
         return self.config.telemetry.required

@@ -401,7 +401,7 @@ def _running_exporter():
 def _power_harness(tmp_path, processes, *, het=False, het_groups=None):
     class Harness(TelemetryStageMixin):
         def __init__(self):
-            # Note (wenyao): srun is mocked so no exporter answers; a short deadline avoids a 30s stall per test.
+            # NOTE: srun is mocked so no exporter answers; a short deadline avoids a 30s stall per test.
             self.config = _make_config(
                 telemetry=_dcgm_power(
                     startup_timeout_seconds=0.2,
