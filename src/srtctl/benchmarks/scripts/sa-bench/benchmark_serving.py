@@ -835,7 +835,7 @@ async def benchmark(
         async with semaphore:
             return await request_func(request_func_input=request_func_input, pbar=pbar)
 
-    # Note (wenyao): the marker write precedes both captures so its fsync latency cannot skew the window.
+    # NOTE: the marker write precedes both captures so its fsync latency cannot skew the window.
     if measurement_window is not None:
         measurement_window.mark_running(time.time())
     benchmark_start_time_unix = time.time()
@@ -864,7 +864,7 @@ async def benchmark(
             tasks.append(asyncio.create_task(limited_request_func(request_func_input=request_func_input, pbar=pbar)))
         outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
     except BaseException as exc:
-        # Note (wenyao): a shared pool must outlive its requests, and a formal window needs every task settled.
+        # NOTE: a shared pool must outlive its requests, and a formal window needs every task settled.
         if (backend == "dynamo" and request_session is not None) or measurement_window is not None:
             for task in tasks:
                 if not task.done():
@@ -1310,7 +1310,7 @@ def main(args: argparse.Namespace):
                 duration=benchmark_result["duration"],
             )
     except BaseException as exc:
-        # Note (wenyao): a failure after the formal end still publishes that unchanged boundary.
+        # NOTE: a failure after the formal end still publishes that unchanged boundary.
         if measurement_window is not None:
             measurement_window.fail_at_recorded_boundary("{}: {}".format(type(exc).__name__, exc))
         raise
