@@ -13,9 +13,7 @@ can check a run without access to the live job.
 
 from __future__ import annotations
 
-import argparse
 import json
-import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -356,44 +354,3 @@ def _check_topology(
         if len(set(assigned)) != len(assigned):
             failures.append(f"roles share a het group: { {role: sorted(g, key=str) for role, g in per_role.items()} }")
     return failures
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Validate a retained dcgm-power artifact package")
-    parser.add_argument("--power-dir", type=Path, required=True, help="directory holding manifest.json and samples.csv")
-    parser.add_argument(
-        "--result-root", type=Path, required=True, help="root that window result_path values resolve under"
-    )
-    parser.add_argument(
-        "--expect-role",
-        action="append",
-        default=[],
-        metavar="ROLE=COUNT",
-        help="require exactly COUNT GPUs mapped to ROLE (repeatable)",
-    )
-    parser.add_argument(
-        "--require-distinct-het-groups",
-        action="store_true",
-        help="require each worker role to occupy its own heterogeneous Slurm group",
-    )
-    args = parser.parse_args(argv)
-
-    expected_roles: dict[str, int] | None = None
-    if args.expect_role:
-        expected_roles = {}
-        for item in args.expect_role:
-            role, _, count = item.partition("=")
-            expected_roles[role] = int(count)
-
-    report = validate_power_artifacts(
-        power_dir=args.power_dir,
-        result_root=args.result_root,
-        expected_roles=expected_roles,
-        require_distinct_het_groups=args.require_distinct_het_groups,
-    )
-    print(report.render())
-    return 0 if report.ok else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())

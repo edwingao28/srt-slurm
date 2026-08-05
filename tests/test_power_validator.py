@@ -17,7 +17,8 @@ from srtctl.core.power.manifest import (
 )
 from srtctl.core.power.samples import SampleRow, SampleWriter, derive_observed_devices
 from srtctl.core.power.topology import build_expected_devices
-from srtctl.core.power.validate_artifacts import main, validate_power_artifacts
+from srtctl.cli.validate_power_artifacts import main
+from srtctl.core.power.validate_artifacts import validate_power_artifacts
 from srtctl.core.topology import Process
 
 START = 1785168100.0
