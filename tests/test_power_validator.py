@@ -13,10 +13,10 @@ from srtctl.core.power.manifest import (
     DcgmExporterIdentity,
     ExpectedWindow,
     PowerManifest,
-    WindowValidation,
 )
 from srtctl.core.power.samples import SampleRow, SampleWriter, derive_observed_devices
 from srtctl.core.power.topology import build_expected_devices
+from srtctl.core.power.windows import validate_expected_windows
 from srtctl.cli.validate_power_artifacts import main
 from srtctl.core.power.validate_artifacts import validate_power_artifacts
 from srtctl.core.topology import Process
@@ -114,17 +114,15 @@ def package(tmp_path):
         manifest.observed_devices = observed
         manifest.sample_row_count = len(written)
         manifest.scrape_count = (max(row.scrape_seq for row in written) + 1) if written else 0
-        manifest.window_validations = [
-            WindowValidation(
-                benchmark_type="sa-bench",
-                concurrency=4,
-                window_file=f"{WINDOWS_DIRNAME}/{RESULT_STEM}.json",
-                power_coverage_valid=True,
-                per_device_max_sample_gap_seconds={
-                    f"{device.hostname}/{device.gpu_uuids[0]}": 1.0 for device in observed
-                },
-            )
-        ]
+        # The audit the producer stores is the one the validator recomputes, so it can never drift.
+        manifest.window_validations = validate_expected_windows(
+            power_dir=power_dir,
+            result_root=log_dir,
+            expected_windows=manifest.expected_windows,
+            expected_device_keys={device.key for device in expected},
+            observed_devices=observed,
+            artifact_errors=manifest.artifact_errors,
+        )
         manifest.mark_terminal(status=STATUS_COMPLETE, stopped_at_unix=END + 5, publication_valid=publication_valid)
         atomic_write_json(power_dir / MANIFEST_FILENAME, manifest.to_dict())
         return log_dir, power_dir
@@ -358,7 +356,7 @@ class TestWireContract:
         report = _validate(power_dir, log_dir)
 
         assert report.ok is False
-        assert any(key in failure or "fatal" in failure for failure in report.failures)
+        assert any(key in failure for failure in report.failures)
 
     @pytest.mark.parametrize(
         "reason",

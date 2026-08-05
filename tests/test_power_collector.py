@@ -101,7 +101,7 @@ class FakeExporter:
                 pass
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread = threading.Thread(target=lambda: self._server.serve_forever(poll_interval=0.01), daemon=True)
         self._thread.start()
 
     @property
@@ -357,16 +357,21 @@ class TestReadiness:
         )
         session.initialize()
 
+        released = threading.Event()
+
         def never_resolves(node, _interface=None):
-            time.sleep(30)
+            released.wait(30)
             return "10.0.0.1"
 
-        with patch("srtctl.core.power.session.get_hostname_ip", side_effect=never_resolves):
-            started = time.perf_counter()
-            ready = session.start_and_wait_for_readiness()
-            elapsed = time.perf_counter() - started
+        try:
+            with patch("srtctl.core.power.session.get_hostname_ip", side_effect=never_resolves):
+                started = time.perf_counter()
+                ready = session.start_and_wait_for_readiness()
+                elapsed = time.perf_counter() - started
 
-        outcome = session.stop_and_finalize()
+            outcome = session.stop_and_finalize()
+        finally:
+            released.set()
 
         assert ready is False
         assert elapsed < 5.0
@@ -887,7 +892,7 @@ class TestExporterIdentity:
 
 
 class TestTerminalStatusAndExit:
-    """Spec §8: lifecycle precedence and the required/best-effort exit table."""
+    """Lifecycle precedence and the required/best-effort exit table."""
 
     def _finalize(self, tmp_path, reasons, *, required):
         session = _session(tmp_path, _endpoints(), required=required)

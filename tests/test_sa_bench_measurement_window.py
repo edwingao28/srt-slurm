@@ -18,10 +18,26 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from srtctl.cli.mixins.benchmark_stage import BenchmarkStageMixin
-from srtctl.core.power.contract import MAX_SAMPLE_GAP_SECONDS, WINDOWS_DIRNAME, Reason
+from srtctl.core.power.contract import (
+    BENCHMARK_TYPE_SA_BENCH,
+    CLOCK_SOURCE,
+    CONTAINER_LOG_DIR,
+    MAX_SAMPLE_GAP_SECONDS,
+    MEASUREMENT_WINDOW_DIR_ENV,
+    SCHEMA_VERSION,
+    WINDOWS_DIRNAME,
+    Reason,
+)
 from srtctl.core.power.manifest import ExpectedWindow
 from srtctl.core.power.samples import SampleRow, derive_observed_devices
-from srtctl.core.power.windows import convert_running_windows, validate_expected_windows
+from srtctl.core.power.windows import (
+    WINDOW_STATUS_COMPLETED,
+    WINDOW_STATUS_FAILED,
+    WINDOW_STATUS_INTERRUPTED,
+    WINDOW_STATUS_RUNNING,
+    convert_running_windows,
+    validate_expected_windows,
+)
 from srtctl.core.schema import (
     BenchmarkConfig,
     FrontendConfig,
@@ -196,6 +212,20 @@ def _validate(logs, observed, expected=(("sa-bench", 4),), errors=None):
     )
 
 
+class TestWriterReaderContract:
+    def test_standalone_writer_constants_match_the_power_contract(self):
+        """The writer is mounted into the bench container and cannot import srtctl."""
+        assert measurement_window.SCHEMA_VERSION == SCHEMA_VERSION
+        assert measurement_window.BENCHMARK_TYPE == BENCHMARK_TYPE_SA_BENCH
+        assert measurement_window.CLOCK_SOURCE == CLOCK_SOURCE
+        assert measurement_window.WINDOW_DIR_ENV == MEASUREMENT_WINDOW_DIR_ENV
+        assert measurement_window.CONTAINER_LOG_DIR == CONTAINER_LOG_DIR
+        assert measurement_window.STATUS_RUNNING == WINDOW_STATUS_RUNNING
+        assert measurement_window.STATUS_COMPLETED == WINDOW_STATUS_COMPLETED
+        assert measurement_window.STATUS_FAILED == WINDOW_STATUS_FAILED
+        assert measurement_window.STATUS_INTERRUPTED == WINDOW_STATUS_INTERRUPTED
+
+
 class TestWindowWriterActivation:
     def test_warmup_without_save_result_writes_nothing(self, logs):
         assert _create(logs, save_result=False) is None
@@ -203,7 +233,7 @@ class TestWindowWriterActivation:
 
     def test_absent_window_dir_env_writes_nothing(self, logs):
         assert _create(logs, window_dir="") is None
-        assert _create(logs, window_dir=None if False else str(logs / "nope")) is None
+        assert _create(logs, window_dir=str(logs / "nope")) is None
 
     def test_missing_result_filename_writes_nothing(self, logs):
         assert _create(logs, result_filename=None) is None
@@ -399,7 +429,6 @@ class TestCoverageValidation:
 
     def test_uuid_change_invalidates_the_window_verdict(self, logs):
         start, end = self._completed(logs)
-        observed = _samples(start, end)
         swapped = derive_observed_devices(
             [
                 SampleRow(start - 1.0, 0, "node-a", 0, "GPU-a0", 400.0),
@@ -407,7 +436,6 @@ class TestCoverageValidation:
                 SampleRow(end + 1.0, 2, "node-a", 0, "GPU-swapped", 400.0),
             ]
         )
-        assert observed  # the happy-path fixture is otherwise identical
 
         rows = _validate(logs, swapped)
 
