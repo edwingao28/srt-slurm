@@ -1301,62 +1301,72 @@ def main(args: argparse.Namespace):
             )
         )
 
-        # Save config and results to json
-        if args.save_result:
-            result_json: dict[str, Any] = {}
+        save_benchmark_result(args, benchmark_result, backend, model_id, tokenizer_id)
 
-            # Setup
-            current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
-            result_json["date"] = current_dt
-            result_json["backend"] = backend
-            result_json["model_id"] = model_id
-            result_json["tokenizer_id"] = tokenizer_id
-            result_json["best_of"] = args.best_of
-            result_json["num_prompts"] = args.num_prompts
-
-            # Metadata
-            if args.metadata:
-                for item in args.metadata:
-                    if "=" in item:
-                        kvstring = item.split("=")
-                        result_json[kvstring[0].strip()] = kvstring[1].strip()
-                    else:
-                        raise ValueError("Invalid metadata format. Please use KEY=VALUE format.")
-
-            # Traffic
-            result_json["request_rate"] = args.request_rate if args.request_rate < float("inf") else "inf"
-            result_json["burstiness"] = args.burstiness
-            result_json["max_concurrency"] = args.max_concurrency
-
-            # Merge with benchmark result
-            result_json = {**result_json, **benchmark_result}
-            # Record the effective transport mode after both free-form metadata and
-            # benchmark output so it cannot disagree with this run.
-            result_json["reuse_http_connections"] = args.reuse_http_connections
-
-            # Save to file
-            base_model_id = model_id.split("/")[-1]
-            max_concurrency_str = f"-concurrency{args.max_concurrency}" if args.max_concurrency is not None else ""
-            file_name = f"{backend}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
-            if args.result_filename:
-                file_name = args.result_filename
-            if args.result_dir:
-                file_name = os.path.join(args.result_dir, file_name)
-            with open(file_name, "w", encoding="utf-8") as outfile:
-                json.dump(result_json, outfile)
-            save_to_pytorch_benchmark_format(args, result_json, file_name)
-
-            if measurement_window is not None:
-                measurement_window.mark_completed(
-                    start_unix=benchmark_result["benchmark_start_time_unix"],
-                    end_unix=benchmark_result["benchmark_end_time_unix"],
-                    duration=benchmark_result["duration"],
-                )
+        if measurement_window is not None:
+            measurement_window.mark_completed(
+                start_unix=benchmark_result["benchmark_start_time_unix"],
+                end_unix=benchmark_result["benchmark_end_time_unix"],
+                duration=benchmark_result["duration"],
+            )
     except BaseException as exc:
         # Note (wenyao): a failure after the formal end still publishes that unchanged boundary.
         if measurement_window is not None:
             measurement_window.fail_at_recorded_boundary("{}: {}".format(type(exc).__name__, exc))
         raise
+
+
+def save_benchmark_result(
+    args: argparse.Namespace,
+    benchmark_result: dict[str, Any],
+    backend: str,
+    model_id: str,
+    tokenizer_id: str,
+) -> None:
+    # Save config and results to json
+    if args.save_result:
+        result_json: dict[str, Any] = {}
+
+        # Setup
+        current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
+        result_json["date"] = current_dt
+        result_json["backend"] = backend
+        result_json["model_id"] = model_id
+        result_json["tokenizer_id"] = tokenizer_id
+        result_json["best_of"] = args.best_of
+        result_json["num_prompts"] = args.num_prompts
+
+        # Metadata
+        if args.metadata:
+            for item in args.metadata:
+                if "=" in item:
+                    kvstring = item.split("=")
+                    result_json[kvstring[0].strip()] = kvstring[1].strip()
+                else:
+                    raise ValueError("Invalid metadata format. Please use KEY=VALUE format.")
+
+        # Traffic
+        result_json["request_rate"] = args.request_rate if args.request_rate < float("inf") else "inf"
+        result_json["burstiness"] = args.burstiness
+        result_json["max_concurrency"] = args.max_concurrency
+
+        # Merge with benchmark result
+        result_json = {**result_json, **benchmark_result}
+        # Record the effective transport mode after both free-form metadata and
+        # benchmark output so it cannot disagree with this run.
+        result_json["reuse_http_connections"] = args.reuse_http_connections
+
+        # Save to file
+        base_model_id = model_id.split("/")[-1]
+        max_concurrency_str = f"-concurrency{args.max_concurrency}" if args.max_concurrency is not None else ""
+        file_name = f"{backend}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
+        if args.result_filename:
+            file_name = args.result_filename
+        if args.result_dir:
+            file_name = os.path.join(args.result_dir, file_name)
+        with open(file_name, "w", encoding="utf-8") as outfile:
+            json.dump(result_json, outfile)
+        save_to_pytorch_benchmark_format(args, result_json, file_name)
 
 
 if __name__ == "__main__":

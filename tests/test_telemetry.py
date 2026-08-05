@@ -448,12 +448,6 @@ def _worker(node, gpus, mode="agg", index=0, het_group=None):
 class TestDcgmPowerExporterLaunch:
     """One exporter task per allocated physical node, owned before the next launch."""
 
-    def test_scraper_entrypoint_refuses_the_power_provider(self, tmp_path):
-        harness = _power_harness(tmp_path, [_worker("node-a", [0])])
-
-        with pytest.raises(ValueError, match="start_power_telemetry"):
-            harness.start_telemetry()
-
     @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
     def test_single_node_launches_one_task_without_a_bash_wrapper(self, mock_srun, tmp_path):
         mock_srun.return_value = _running_exporter()

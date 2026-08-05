@@ -268,8 +268,6 @@ class TelemetryStageMixin:
         if not telemetry.enabled:
             logger.info("Telemetry disabled")
             return []
-        if telemetry.provider == TelemetryProvider.DCGM_POWER:
-            raise ValueError("provider dcgm-power is started by start_power_telemetry()")
         if telemetry.dcgm_exporter is None or telemetry.node_exporter is None or telemetry.container_image is None:
             raise ValueError("Telemetry is enabled but required provider configuration is missing")
 
