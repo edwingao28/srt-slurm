@@ -30,8 +30,7 @@ from srtctl.core.power.samples import (
     derive_observed_devices,
     read_samples,
 )
-from srtctl.core.power.topology import build_expected_devices, resolve_het_groups, resolve_roles
-from srtctl.core.power.validation import validate_devices
+from srtctl.core.power.topology import build_expected_devices, resolve_het_groups, resolve_roles, validate_devices
 from srtctl.core.topology import Process
 
 

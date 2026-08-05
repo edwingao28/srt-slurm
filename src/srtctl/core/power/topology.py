@@ -9,7 +9,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from srtctl.core.power.contract import Reason
+from srtctl.core.power.contract import Reason, dedupe
+from srtctl.core.power.samples import ObservedDevice
 from srtctl.core.topology import Process
 
 DeviceKey = tuple[str, int]
@@ -97,3 +98,41 @@ def resolve_het_groups(devices: Sequence[ExpectedDevice]) -> tuple[dict[str, int
             return {}, (Reason.CONFLICTING_HET_GROUPS,)
         groups[device.hostname] = group
     return groups, ()
+
+
+@dataclass(frozen=True)
+class DeviceValidation:
+    """Whether device identity and topology permit publication."""
+
+    valid: bool
+    reason_codes: tuple[str, ...]
+
+
+def validate_devices(
+    expected: Sequence[ExpectedDevice],
+    observed: Sequence[ObservedDevice],
+) -> DeviceValidation:
+    """Require a non-empty expected set that exactly matches stable observations."""
+    reasons: list[str] = []
+
+    expected_keys = {device.key for device in expected}
+    observed_keys = {device.key for device in observed}
+
+    if not expected_keys or expected_keys - observed_keys:
+        reasons.append(Reason.EXPECTED_DEVICE_MISSING)
+    if observed_keys - expected_keys:
+        reasons.append(Reason.UNEXPECTED_DEVICE)
+    # Note (wenyao): a UUID must map 1:1 to a device key, or one physical GPU is counted twice.
+    if any(len(device.gpu_uuids) != 1 for device in observed):
+        reasons.append(Reason.GPU_UUID_CHANGED)
+    else:
+        uuids = [device.gpu_uuids[0] for device in observed]
+        if len(set(uuids)) != len(uuids):
+            reasons.append(Reason.GPU_UUID_CHANGED)
+
+    _, role_conflicts = resolve_roles(expected)
+    _, group_conflicts = resolve_het_groups(expected)
+    reasons.extend(role_conflicts)
+    reasons.extend(group_conflicts)
+
+    return DeviceValidation(valid=not reasons, reason_codes=dedupe(reasons))

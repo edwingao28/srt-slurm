@@ -45,8 +45,7 @@ from srtctl.core.power.manifest import (
 )
 from srtctl.core.power.parser import parse_power_scrape
 from srtctl.core.power.samples import SampleRow, SampleWriter, derive_observed_devices, read_samples
-from srtctl.core.power.topology import ExpectedDevice
-from srtctl.core.power.validation import validate_devices
+from srtctl.core.power.topology import ExpectedDevice, validate_devices
 from srtctl.core.power.windows import convert_running_windows, validate_expected_windows
 from srtctl.core.processes import ManagedProcess
 from srtctl.core.slurm import get_hostname_ip

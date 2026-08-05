@@ -42,8 +42,8 @@ from srtctl.core.power.topology import (
     ExpectedDevice,
     resolve_het_groups,
     resolve_roles,
+    validate_devices,
 )
-from srtctl.core.power.validation import validate_devices
 from srtctl.core.power.windows import validate_expected_windows
 
 
