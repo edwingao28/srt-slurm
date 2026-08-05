@@ -14,8 +14,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from srtctl.cli.do_sweep import SweepOrchestrator
-from srtctl.cli.mixins.benchmark_stage import BenchmarkStageMixin, _terminate_and_reap
+from srtctl.cli.mixins.benchmark_stage import BenchmarkStageMixin
 from srtctl.cli.mixins.telemetry_stage import TelemetryStageMixin
+from srtctl.core.processes import terminate_and_reap
 from srtctl.core.power.contract import MANIFEST_FILENAME, SAMPLES_FILENAME, WINDOWS_DIRNAME, Reason
 from srtctl.core.power.manifest import ExpectedWindow
 from srtctl.core.power.samples import read_samples
@@ -839,17 +840,19 @@ class TestBenchmarkChildReaping:
 
     def test_terminate_and_reap_reports_an_unreapable_child(self):
         proc = MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = None
         proc.wait.side_effect = subprocess.TimeoutExpired(cmd="bench", timeout=1)
 
-        assert _terminate_and_reap(proc) is False
+        assert terminate_and_reap(proc, terminate_timeout=0.01, kill_timeout=0.01) is False
         proc.terminate.assert_called_once()
         proc.kill.assert_called_once()
 
     def test_terminate_and_reap_reports_a_reaped_child(self):
         proc = MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = None
         proc.wait.return_value = -15
 
-        assert _terminate_and_reap(proc) is True
+        assert terminate_and_reap(proc) is True
         proc.kill.assert_not_called()
 
 

@@ -9,7 +9,6 @@ Handles benchmark execution and profiling.
 
 import logging
 import shlex
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -23,6 +22,7 @@ from srtctl.core.power.contract import (
     MEASUREMENT_WINDOW_DIR_ENV,
     WINDOWS_DIRNAME,
 )
+from srtctl.core.processes import terminate_and_reap
 from srtctl.core.schema import TelemetryProvider
 from srtctl.core.slurm import get_hostname_ip, start_srun_process
 from srtctl.core.status import JobStage, JobStatus, StatusReporter
@@ -107,23 +107,6 @@ def _get_health_expectations(
 
     count_desc = worker_desc
     return logical_prefill, logical_decode, count_desc, logical_prefill + logical_decode
-
-
-def _terminate_and_reap(proc: subprocess.Popen) -> bool:
-    """Terminate, then kill, then confirm the benchmark child was reaped."""
-    proc.terminate()
-    try:
-        proc.wait(timeout=_BENCHMARK_TERMINATE_TIMEOUT)
-        return True
-    except subprocess.TimeoutExpired:
-        logger.warning("Benchmark did not terminate, killing")
-    proc.kill()
-    try:
-        proc.wait(timeout=_BENCHMARK_KILL_TIMEOUT)
-        return True
-    except subprocess.TimeoutExpired:
-        logger.error("Benchmark child was not reaped; measurement windows stay untouched")
-        return False
 
 
 class BenchmarkStageMixin:
@@ -359,7 +342,11 @@ class BenchmarkStageMixin:
             return proc.returncode or 0
         finally:
             if proc.poll() is None:
-                self.benchmark_child_reaped = _terminate_and_reap(proc)
+                self.benchmark_child_reaped = terminate_and_reap(
+                    proc,
+                    terminate_timeout=_BENCHMARK_TERMINATE_TIMEOUT,
+                    kill_timeout=_BENCHMARK_KILL_TIMEOUT,
+                )
             elif self.benchmark_child_reaped is False:
                 proc.wait()
                 self.benchmark_child_reaped = True
