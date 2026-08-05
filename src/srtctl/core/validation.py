@@ -78,6 +78,14 @@ class PreflightResult:
         }
 
 
+def _is_registry_uri(value: str) -> bool:
+    # Mirrors the runtime classification in runtime.py (RuntimeContext.from_config):
+    # anything not starting with "/" or "./" is forwarded to ``srun --container-image``,
+    # which Pyxis/enroot pulls on first use. The ":" guard distinguishes a URI
+    # (registry/...:tag or scheme://...) from a typo'd local relative path.
+    return not value.startswith(("/", "./")) and ":" in value
+
+
 def _expand_path(value: str) -> str:
     return os.path.expanduser(os.path.expandvars(value))
 
@@ -211,13 +219,8 @@ def _preflight_container(
         )
 
     # Container image URIs (e.g. "nvcr.io/nvidia/sglang-runtime:0.8.1",
-    # "vllm/vllm-openai:latest", "docker://...").  Mirrors the runtime
-    # classification in runtime.py (RuntimeContext.from_config): anything
-    # not starting with "/" or "./" is forwarded to ``srun
-    # --container-image``, which Pyxis/enroot pulls on first use.  The
-    # ":" guard distinguishes a URI (registry/...:tag or scheme://...)
-    # from a typo'd local relative path.
-    if isinstance(raw, str) and not raw.startswith(("/", "./")) and ":" in raw:
+    # "vllm/vllm-openai:latest", "docker://...").
+    if isinstance(raw, str) and _is_registry_uri(raw):
         return (
             PreflightResolution(
                 field="model.container",
@@ -306,7 +309,7 @@ def _preflight_telemetry(
         if not resolved_value:
             continue  # schema-level validator handles required-when-enabled
         # Note (wenyao): a registry URI is pulled at srun time, so there is no local file to stat.
-        if "://" in str(resolved_value):
+        if _is_registry_uri(str(resolved_value)):
             continue
 
         ok, _ = _check_path(_expand_path(resolved_value), expect="file")

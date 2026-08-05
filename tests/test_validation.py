@@ -594,6 +594,19 @@ class TestPreflightConfigVariants:
         assert results[0].ok is True
         assert not any(issue.code == "telemetry-container-not-available" for issue in results[0].errors)
 
+    def test_dcgm_power_preflight_accepts_a_bare_registry_exporter(self, tmp_path):
+        model_dir = tmp_path / "model"
+        model_dir.mkdir()
+        container_file = tmp_path / "container.sqsh"
+        container_file.write_text("sqsh")
+
+        results = preflight_config_variants(
+            self._dcgm_power_recipe(model_dir, container_file, "nvcr.io/nvidia/k8s/dcgm-exporter:3.3.5-3.4.0-ubuntu22.04")
+        )
+
+        assert results[0].ok is True
+        assert not any(issue.code == "telemetry-container-not-available" for issue in results[0].errors)
+
     def test_dcgm_power_preflight_ignores_scraper_and_node_exporter_images(self, tmp_path):
         """Those images are never launched by this provider."""
         model_dir = tmp_path / "model"
