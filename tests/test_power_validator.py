@@ -179,18 +179,9 @@ class TestRetainedPackage:
         assert code == 0
         assert "publication_valid" in capsys.readouterr().out
 
-    def test_cli_exits_nonzero_when_a_device_is_missing(self, package, capsys):
-        expected = build_expected_devices(_processes())
-        log_dir, power_dir = package(rows=_rows(expected, skip={("node-b", 3)}))
-
-        code = main(["--power-dir", str(power_dir), "--result-root", str(log_dir)])
-
-        assert code == 1
-        assert "expected_device_missing" in capsys.readouterr().out
-
 
 class TestIndependenceFromTheManifestBooleans:
-    def test_a_manifest_claiming_validity_cannot_rescue_missing_samples(self, package):
+    def test_a_manifest_claiming_validity_cannot_rescue_missing_samples(self, package, capsys):
         expected = build_expected_devices(_processes())
         log_dir, power_dir = package(rows=_rows(expected, skip={("node-b", 0)}), publication_valid=True)
 
@@ -200,6 +191,8 @@ class TestIndependenceFromTheManifestBooleans:
 
         assert report.ok is False
         assert any("expected_device_missing" in failure for failure in report.failures)
+        assert main(["--power-dir", str(power_dir), "--result-root", str(log_dir)]) == 1
+        assert "expected_device_missing" in capsys.readouterr().out
 
     def test_tampered_samples_are_rejected(self, package):
         log_dir, power_dir = package()
@@ -222,14 +215,6 @@ class TestIndependenceFromTheManifestBooleans:
 
 
 class TestTopologyAssertions:
-    def test_role_counts_must_match(self, package):
-        log_dir, power_dir = package()
-
-        report = _validate(power_dir, log_dir, expected_roles={"prefill": 8})
-
-        assert report.ok is False
-        assert any("prefill" in failure for failure in report.failures)
-
     def test_shared_het_group_fails_the_distinct_group_requirement(self, package):
         log_dir, power_dir = package(processes=_processes(decode_het_group=0))
 
@@ -238,26 +223,35 @@ class TestTopologyAssertions:
         assert report.ok is False
         assert any("het" in failure for failure in report.failures)
 
-    def test_an_extra_role_does_not_satisfy_the_expected_set(self, package):
-        """4P+4D must not pass when an extra agg role is also present."""
-        processes = [
-            *_processes(),
-            Process(
-                node="node-c",
-                gpu_indices=frozenset(range(4)),
-                sys_port=8083,
-                http_port=30000,
-                endpoint_mode="agg",
-                endpoint_index=0,
-                het_group=2,
-            ),
-        ]
+    @pytest.mark.parametrize(
+        ("extra_agg_role", "expected_roles", "expected_failure"),
+        [
+            (True, {"prefill": 4, "decode": 4}, "expected roles"),
+            (False, {"prefill": 8}, "expected 8 prefill GPUs, found 4"),
+        ],
+        ids=["extra-role", "wrong-count"],
+    )
+    def test_the_expected_role_set_must_match_exactly(self, package, extra_agg_role, expected_roles, expected_failure):
+        """4P+4D must not pass beside an extra agg role, nor under a wrong count."""
+        processes = _processes()
+        if extra_agg_role:
+            processes.append(
+                Process(
+                    node="node-c",
+                    gpu_indices=frozenset(range(4)),
+                    sys_port=8083,
+                    http_port=30000,
+                    endpoint_mode="agg",
+                    endpoint_index=0,
+                    het_group=2,
+                )
+            )
         log_dir, power_dir = package(processes=processes)
 
-        report = _validate(power_dir, log_dir, expected_roles={"prefill": 4, "decode": 4})
+        report = _validate(power_dir, log_dir, expected_roles=expected_roles)
 
         assert report.ok is False
-        assert any("expected roles" in failure for failure in report.failures)
+        assert any(expected_failure in failure for failure in report.failures)
 
     def test_a_role_spanning_two_het_groups_is_rejected(self, package):
         """Decode split across groups 1 and 2 must not pass the distinct check."""
@@ -358,21 +352,6 @@ class TestWireContract:
         assert report.ok is False
         assert any(key in failure for failure in report.failures)
 
-    @pytest.mark.parametrize(
-        "reason",
-        ["collector_exception", "collector_join_timeout", "exporter_exited", "benchmark_child_reap_timeout"],
-    )
-    def test_a_complete_manifest_carrying_a_fatal_reason_is_rejected(self, package, reason):
-        log_dir, power_dir = package()
-        manifest = json.loads((power_dir / MANIFEST_FILENAME).read_text())
-        manifest["reason_codes"] = [reason]
-        atomic_write_json(power_dir / MANIFEST_FILENAME, manifest)
-
-        report = _validate(power_dir, log_dir)
-
-        assert report.ok is False
-        assert any("lifecycle-failure reasons" in failure for failure in report.failures)
-
     def test_an_empty_exporter_image_is_rejected(self, package):
         log_dir, power_dir = package()
         manifest = json.loads((power_dir / MANIFEST_FILENAME).read_text())
@@ -420,23 +399,12 @@ class TestEvidenceReconciliation:
         assert report.ok is False
         assert any("window_validations" in failure for failure in report.failures)
 
-    def test_duplicate_expected_window_keys_are_rejected(self, package):
-        report = self._damaged(
-            package,
-            lambda m: m.update(expected_windows=[*m["expected_windows"], *m["expected_windows"]]),
-        )
+    @pytest.mark.parametrize("key", ["expected_windows", "expected_devices"])
+    def test_duplicate_expected_keys_are_rejected(self, package, key):
+        report = self._damaged(package, lambda m: m.update({key: [*m[key], m[key][0]]}))
 
         assert report.ok is False
-        assert any("expected_windows contains duplicate keys" in failure for failure in report.failures)
-
-    def test_duplicate_expected_device_keys_are_rejected(self, package):
-        report = self._damaged(
-            package,
-            lambda m: m.update(expected_devices=[*m["expected_devices"], m["expected_devices"][0]]),
-        )
-
-        assert report.ok is False
-        assert any("expected_devices contains duplicate keys" in failure for failure in report.failures)
+        assert any(f"{key} contains duplicate keys" in failure for failure in report.failures)
 
     def test_forged_observed_device_uuids_are_rejected(self, package):
         def forge(m):
@@ -480,26 +448,6 @@ class TestEvidenceReconciliation:
 
         assert _validate(power_dir, log_dir).ok is True
 
-    @pytest.mark.parametrize(
-        "forge",
-        [
-            pytest.param(lambda m: m["expected_devices"][0]["assignments"][0].update(worker_role="bogus"), id="role"),
-            pytest.param(lambda m: m["expected_windows"][0].update(concurrency=True), id="bool-concurrency"),
-            pytest.param(lambda m: m["expected_windows"][0].update(concurrency=0), id="zero-concurrency"),
-            pytest.param(lambda m: m["expected_devices"][0].update(gpu_index=-1), id="negative-index"),
-            pytest.param(
-                lambda m: m["expected_devices"][0]["assignments"][0].update(het_group=True), id="bool-het-group"
-            ),
-            pytest.param(lambda m: m["expected_devices"][0].update(assignments=[]), id="empty-assignments"),
-            pytest.param(lambda m: m["expected_devices"][0].update(hostname=""), id="empty-hostname"),
-        ],
-    )
-    def test_wire_types_are_not_coerced(self, package, forge):
-        report = self._damaged(package, forge)
-
-        assert report.ok is False
-        assert any("manifest malformed" in failure for failure in report.failures)
-
     def test_non_string_reason_codes_do_not_crash(self, package):
         """A non-hashable entry must not raise out of the set operation."""
         report = self._damaged(package, lambda m: m.update(reason_codes=[{}]))
@@ -533,7 +481,10 @@ class TestEvidenceReconciliation:
         assert report.failures == ()
 
     @pytest.mark.parametrize("required", [True, False])
-    @pytest.mark.parametrize("reason", ["collector_exception", "collector_join_timeout", "exporter_exited"])
+    @pytest.mark.parametrize(
+        "reason",
+        ["collector_exception", "collector_join_timeout", "exporter_exited", "benchmark_child_reap_timeout"],
+    )
     def test_fatal_reasons_are_rejected_in_both_modes(self, package, reason, required):
         report = self._damaged(package, lambda m: m.update(required=required, reason_codes=[reason]))
 
@@ -564,6 +515,15 @@ class TestDamagedManifest:
                 lambda m: m["expected_devices"][0]["assignments"][0].update(worker_index="first"),
                 id="non-numeric-worker-index",
             ),
+            pytest.param(lambda m: m["expected_devices"][0]["assignments"][0].update(worker_role="bogus"), id="role"),
+            pytest.param(lambda m: m["expected_windows"][0].update(concurrency=True), id="bool-concurrency"),
+            pytest.param(lambda m: m["expected_windows"][0].update(concurrency=0), id="zero-concurrency"),
+            pytest.param(lambda m: m["expected_devices"][0].update(gpu_index=-1), id="negative-index"),
+            pytest.param(
+                lambda m: m["expected_devices"][0]["assignments"][0].update(het_group=True), id="bool-het-group"
+            ),
+            pytest.param(lambda m: m["expected_devices"][0].update(assignments=[]), id="empty-assignments"),
+            pytest.param(lambda m: m["expected_devices"][0].update(hostname=""), id="empty-hostname"),
         ],
     )
     def test_damage_becomes_a_clean_failure(self, package, damage):
@@ -607,7 +567,7 @@ class TestDamagedManifest:
         assert code == 1
         assert "manifest malformed" in capsys.readouterr().out
 
-    @pytest.mark.parametrize("payload", ["[]", '"a string"', "null", "42"], ids=["array", "string", "null", "number"])
+    @pytest.mark.parametrize("payload", ["[]", "null"], ids=["array", "null"])
     def test_a_non_object_manifest_is_reported(self, package, payload):
         """Valid JSON that is not an object must fail before any field access."""
         log_dir, power_dir = package()

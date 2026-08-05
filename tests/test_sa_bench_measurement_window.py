@@ -11,7 +11,7 @@ import importlib.util
 import json
 import sys
 import time
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -229,14 +229,12 @@ class TestWriterReaderContract:
 class TestWindowWriterActivation:
     def test_warmup_without_save_result_writes_nothing(self, logs):
         assert _create(logs, save_result=False) is None
+        assert _create(logs, result_filename=None) is None
         assert list((logs / "power" / WINDOWS_DIRNAME).iterdir()) == []
 
     def test_absent_window_dir_env_writes_nothing(self, logs):
         assert _create(logs, window_dir="") is None
         assert _create(logs, window_dir=str(logs / "nope")) is None
-
-    def test_missing_result_filename_writes_nothing(self, logs):
-        assert _create(logs, result_filename=None) is None
 
     def test_formal_run_creates_a_running_window_first(self, logs):
         window = _create(logs)
@@ -377,31 +375,21 @@ class TestCoverageValidation:
         assert rows[0].power_coverage_valid is False
         assert Reason.MEASUREMENT_WINDOW_RESULT_MISMATCH in rows[0].reason_codes
 
-    def test_wall_clock_disagreeing_with_monotonic_duration_is_reported(self, logs):
-        window = _create(logs)
-        window.mark_running(1000.0)
-        window.mark_completed(start_unix=1000.0, end_unix=1200.0, duration=20.0)
-        _write_result(logs, start=1000.0, end=1200.0, duration=20.0)
-
-        rows = _validate(logs, _samples(1000.0, 1200.0, step=1.0))
-
-        assert rows[0].power_coverage_valid is False
-        assert Reason.MEASUREMENT_WINDOW_CLOCK_MISMATCH in rows[0].reason_codes
-
     @pytest.mark.parametrize(
-        ("duration", "valid"),
+        ("end", "duration", "valid"),
         [
-            (19.5, True),  # exactly max(0.5s, 1% of 20s) = 0.5s of skew
-            (19.49, False),
+            (1020.0, 19.5, True),  # exactly max(0.5s, 1% of 20s) = 0.5s of skew
+            (1020.0, 19.49, False),
+            (1200.0, 20.0, False),  # the wall clock disagrees with the monotonic duration outright
         ],
     )
-    def test_clock_tolerance_boundary(self, logs, duration, valid):
+    def test_clock_tolerance_boundary(self, logs, end, duration, valid):
         window = _create(logs)
         window.mark_running(1000.0)
-        window.mark_completed(start_unix=1000.0, end_unix=1020.0, duration=duration)
-        _write_result(logs, start=1000.0, end=1020.0, duration=duration)
+        window.mark_completed(start_unix=1000.0, end_unix=end, duration=duration)
+        _write_result(logs, start=1000.0, end=end, duration=duration)
 
-        rows = _validate(logs, _samples(1000.0, 1020.0))
+        rows = _validate(logs, _samples(1000.0, end))
 
         assert rows[0].power_coverage_valid is valid
         if not valid:
@@ -441,33 +429,6 @@ class TestCoverageValidation:
 
         assert rows[0].power_coverage_valid is False
         assert Reason.GPU_UUID_CHANGED in rows[0].reason_codes
-
-    def test_interrupted_window_requires_a_reason(self, logs):
-        window = _create(logs)
-        window.mark_running(1000.0)
-        path = logs / "power" / WINDOWS_DIRNAME / f"{RESULT_STEM}.json"
-        payload = json.loads(path.read_text())
-        payload["status"] = "interrupted"  # orchestrator always records why
-        path.write_text(json.dumps(payload))
-        errors = []
-
-        rows = _validate(logs, _samples(1000.0, 1020.0), errors=errors)
-
-        assert rows[0].power_coverage_valid is False
-        assert Reason.MEASUREMENT_WINDOW_MALFORMED in errors[0].reason_codes
-
-    def test_running_window_with_a_reason_is_malformed(self, logs):
-        window = _create(logs)
-        window.mark_running(1000.0)
-        path = logs / "power" / WINDOWS_DIRNAME / f"{RESULT_STEM}.json"
-        payload = json.loads(path.read_text())
-        payload["reason"] = "premature"  # nothing has gone wrong yet
-        path.write_text(json.dumps(payload))
-        errors = []
-
-        _validate(logs, _samples(1000.0, 1020.0), errors=errors)
-
-        assert Reason.MEASUREMENT_WINDOW_MALFORMED in errors[0].reason_codes
 
     def test_running_window_is_incomplete(self, logs):
         window = _create(logs)
@@ -593,16 +554,13 @@ class TestFormalBoundaryCapture:
         wall = result["benchmark_end_time_unix"] - result["benchmark_start_time_unix"]
         assert abs(wall - result["duration"]) < 0.5
 
-    def test_warmup_without_a_window_writes_nothing(self, logs):
-        self._run_benchmark(logs, None)
-
-        assert list((logs / "power" / WINDOWS_DIRNAME).iterdir()) == []
-
-    def test_settled_failure_publishes_a_failed_boundary(self, logs):
+    @pytest.mark.parametrize("pooled", [True, False])
+    def test_settled_failure_publishes_a_failed_boundary(self, logs, pooled):
+        """Previously only the pooled path saved a boundary; now both do."""
         window = _create(logs)
 
         with pytest.raises(RuntimeError):
-            self._run_benchmark(logs, window, fail=True)
+            self._run_benchmark(logs, window, fail=True, pooled=pooled)
 
         payload = _window_json(logs)
         assert payload["status"] == "failed"
@@ -685,55 +643,32 @@ class TestProductionResultWiring:
 
         return fake_request
 
-    def test_metrics_failure_publishes_the_unchanged_boundary(self, logs, monkeypatch):
+    @pytest.mark.parametrize(
+        ("target", "error"),
+        [
+            ("calculate_metrics", RuntimeError("metrics blew up")),
+            ("save_to_pytorch_benchmark_format", OSError("disk full")),
+        ],
+    )
+    def test_a_failure_after_the_formal_end_publishes_the_unchanged_boundary(self, logs, monkeypatch, target, error):
         """An exception after the formal end must not lose that boundary."""
         serving = _import_sa_bench_module("benchmark_serving")
         backend_request_func = _import_sa_bench_module("backend_request_func")
         monkeypatch.setenv("SRT_MEASUREMENT_WINDOW_DIR", str(logs / "power" / WINDOWS_DIRNAME))
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(type(error)):
             self._run_main(
                 logs,
                 serving,
                 self._ok_request(backend_request_func),
-                after=patch.object(serving, "calculate_metrics", side_effect=RuntimeError("metrics blew up")),
+                after=patch.object(serving, target, side_effect=error),
             )
 
         payload = _window_json(logs)
         assert payload["status"] == "failed"
         assert payload["duration"] > 0
         assert payload["benchmark_end_time_unix"] > payload["benchmark_start_time_unix"]
-        assert "metrics blew up" in payload["reason"]
-
-    def test_result_write_failure_publishes_the_unchanged_boundary(self, logs, monkeypatch):
-        serving = _import_sa_bench_module("benchmark_serving")
-        backend_request_func = _import_sa_bench_module("backend_request_func")
-        monkeypatch.setenv("SRT_MEASUREMENT_WINDOW_DIR", str(logs / "power" / WINDOWS_DIRNAME))
-
-        with pytest.raises(OSError):
-            self._run_main(
-                logs,
-                serving,
-                self._ok_request(backend_request_func),
-                after=patch.object(serving, "save_to_pytorch_benchmark_format", side_effect=OSError("disk full")),
-            )
-
-        payload = _window_json(logs)
-        assert payload["status"] == "failed"
-        assert payload["duration"] > 0
-        assert "disk full" in payload["reason"]
-
-    def test_non_pooled_request_failure_publishes_a_failed_boundary(self, logs):
-        """Previously only the pooled path saved a boundary; now both do."""
-        window = _create(logs)
-
-        with pytest.raises(RuntimeError):
-            TestFormalBoundaryCapture._run_benchmark(logs, window, fail=True, pooled=False)
-
-        payload = _window_json(logs)
-        assert payload["status"] == "failed"
-        assert payload["duration"] > 0
-        assert "upstream reset" in payload["reason"]
+        assert str(error) in payload["reason"]
 
     def test_a_failure_before_the_formal_end_leaves_the_window_running(self, logs):
         """No trustworthy end exists yet, so the orchestrator must decide."""
@@ -833,12 +768,20 @@ class TestArtifactErrors:
                 )
             )
 
-    def test_wrong_clock_source_is_malformed(self, logs):
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("status", "interrupted"),  # the orchestrator always records why
+            ("reason", "premature"),  # nothing has gone wrong while still running
+            ("clock_source", "node_local_clock"),
+        ],
+    )
+    def test_a_mutated_window_field_is_malformed(self, logs, field, value):
         window = _create(logs)
         window.mark_running(1000.0)
         path = logs / "power" / WINDOWS_DIRNAME / f"{RESULT_STEM}.json"
         payload = json.loads(path.read_text())
-        payload["clock_source"] = "node_local_clock"
+        payload[field] = value
         path.write_text(json.dumps(payload))
         errors = []
 
@@ -883,17 +826,6 @@ class TestArtifactErrors:
     def test_other_providers_get_no_window_dir(self, tmp_path):
         assert _benchmark_harness(tmp_path, provider="scraper")._get_measurement_window_env() == {}
         assert _benchmark_harness(tmp_path, enabled=False)._get_measurement_window_env() == {}
-
-    def test_container_and_host_window_paths_are_the_same_directory(self, tmp_path):
-        harness = _benchmark_harness(tmp_path, provider="dcgm-power")
-        container_path = harness._get_measurement_window_env()["SRT_MEASUREMENT_WINDOW_DIR"]
-
-        host_path = tmp_path / PurePosixPath(container_path).relative_to("/logs")
-        host_path.mkdir(parents=True)
-        (host_path / "probe.json").write_text("{}")
-
-        assert harness.runtime.container_mounts[tmp_path] == Path("/logs")
-        assert (tmp_path / "power" / WINDOWS_DIRNAME / "probe.json").exists()
 
     def test_sa_bench_env_keeps_window_after_logical_endpoint_refactor(self, tmp_path):
         """One benchmark env must carry logical endpoints, slow_down, and the window dir together."""

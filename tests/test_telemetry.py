@@ -170,45 +170,42 @@ class TestDcgmPowerConfig:
         assert schema_module._BENCHMARK_TYPE_SA_BENCH == contract.BENCHMARK_TYPE_SA_BENCH
         assert schema_module._DCGM_POWER_MAX_SAMPLE_GAP_SECONDS == contract.MAX_SAMPLE_GAP_SECONDS
 
-    def test_dedicated_infra_node_is_rejected(self):
-        with pytest.raises(ValidationError, match="etcd_nats_dedicated_node"):
-            SrtConfig(
+    @pytest.mark.parametrize(
+        ("telemetry", "benchmark", "dedicated", "rejected"),
+        [
+            (_dcgm_power(), _sa_bench(), True, True),
+            (_dcgm_power(), _sa_bench(), False, False),
+            (
+                TelemetryConfig(
+                    enabled=True,
+                    container_image="scraper:latest",
+                    dcgm_exporter=TelemetryExporterConfig(container_image="dcgm:latest", port=9401),
+                    node_exporter=TelemetryExporterConfig(container_image="node:latest", port=9101),
+                ),
+                BenchmarkConfig(type="manual"),
+                True,
+                False,
+            ),
+        ],
+        ids=["dcgm-power-dedicated", "dcgm-power-shared", "scraper-dedicated"],
+    )
+    def test_a_dedicated_infra_node_is_rejected_only_for_dcgm_power(self, telemetry, benchmark, dedicated, rejected):
+        def build():
+            return SrtConfig(
                 name="test",
                 model=ModelConfig(path="/model", container="/image", precision="fp4"),
                 resources=ResourceConfig(gpu_type="h100"),
-                benchmark=_sa_bench(),
-                telemetry=_dcgm_power(),
-                infra=InfraConfig(etcd_nats_dedicated_node=True),
+                benchmark=benchmark,
+                telemetry=telemetry,
+                infra=InfraConfig(etcd_nats_dedicated_node=dedicated),
             )
 
-    def test_shared_infra_node_is_accepted(self):
-        config = SrtConfig(
-            name="test",
-            model=ModelConfig(path="/model", container="/image", precision="fp4"),
-            resources=ResourceConfig(gpu_type="h100"),
-            benchmark=_sa_bench(),
-            telemetry=_dcgm_power(),
-            infra=InfraConfig(etcd_nats_dedicated_node=False),
-        )
+        if rejected:
+            with pytest.raises(ValidationError, match="etcd_nats_dedicated_node"):
+                build()
+            return
 
-        assert config.telemetry.provider == TelemetryProvider.DCGM_POWER
-
-    def test_dedicated_infra_node_is_unaffected_for_other_providers(self):
-        config = SrtConfig(
-            name="test",
-            model=ModelConfig(path="/model", container="/image", precision="fp4"),
-            resources=ResourceConfig(gpu_type="h100"),
-            benchmark=BenchmarkConfig(type="manual"),
-            telemetry=TelemetryConfig(
-                enabled=True,
-                container_image="scraper:latest",
-                dcgm_exporter=TelemetryExporterConfig(container_image="dcgm:latest", port=9401),
-                node_exporter=TelemetryExporterConfig(container_image="node:latest", port=9101),
-            ),
-            infra=InfraConfig(etcd_nats_dedicated_node=True),
-        )
-
-        assert config.infra.etcd_nats_dedicated_node is True
+        assert build().infra.etcd_nats_dedicated_node is dedicated
 
     def test_unknown_provider_is_rejected(self):
         with pytest.raises(ValidationError, match="Unsupported telemetry provider"):
@@ -547,12 +544,14 @@ class TestDcgmPowerExporterLaunch:
         session.stop_and_finalize()
 
     @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
-    def test_each_group_is_registered_before_the_next_launch(self, mock_srun, tmp_path):
+    def test_second_group_failure_leaves_the_first_group_owned(self, mock_srun, tmp_path):
         registry = ProcessRegistry(job_id="12345")
         owned_at_launch = []
 
         def record(*_args, **_kwargs):
             owned_at_launch.append(registry.process_count)
+            if len(owned_at_launch) > 1:
+                raise RuntimeError("srun refused")
             return _running_exporter()
 
         mock_srun.side_effect = record
@@ -567,27 +566,9 @@ class TestDcgmPowerExporterLaunch:
         )
 
         session = harness.start_power_telemetry(registry)
-
-        assert owned_at_launch == [0, 1]
-        session.stop_and_finalize()
-
-    @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
-    def test_second_group_failure_leaves_the_first_group_owned(self, mock_srun, tmp_path):
-        mock_srun.side_effect = [_running_exporter(), RuntimeError("srun refused")]
-        registry = ProcessRegistry(job_id="12345")
-        harness = _power_harness(
-            tmp_path,
-            [
-                _worker("node-a", range(4), mode="prefill", het_group=0),
-                _worker("node-b", range(4), mode="decode", het_group=1),
-            ],
-            het=True,
-            het_groups={"node-a": 0, "node-b": 1},
-        )
-
-        session = harness.start_power_telemetry(registry)
         outcome = session.stop_and_finalize()
 
+        assert owned_at_launch == [0, 1]
         assert registry.process_count == 1
         assert Reason.EXPORTER_LAUNCH_FAILED in outcome.reason_codes
         assert outcome.status == "failed"

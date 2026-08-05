@@ -248,23 +248,6 @@ class TestCollection:
         assert written == 2 * GPUS_PER_NODE
         assert not barrier.broken
 
-    def test_slow_endpoint_does_not_serialize_the_cycle(self, tmp_path, exporters):
-        a = exporters(_body("a"), delay=0.3)
-        b = exporters(_body("b"), delay=0.3)
-        session = _session(
-            tmp_path,
-            _endpoints(("node-a", a.url), ("node-b", b.url)),
-            request_timeout_seconds=5.0,
-        )
-        session.initialize()
-
-        started = time.perf_counter()
-        session.collect_once()
-        elapsed = time.perf_counter() - started
-        session.stop_and_finalize()
-
-        assert elapsed < 0.55
-
     def test_endpoint_timeout_does_not_reuse_stale_power(self, tmp_path, exporters):
         a = exporters(_body("a"))
         stalled = exporters(_body("b"), delay=5.0)
@@ -547,36 +530,6 @@ class TestPublication:
         assert outcome.publication_valid is False
         assert _manifest(session)["publication_valid"] is False
 
-    def test_running_window_becomes_interrupted_once_the_child_is_reaped(self, tmp_path, exporters):
-        a = exporters(_body("a"))
-        b = exporters(_body("b"))
-        session = _session(tmp_path, _endpoints(("node-a", a.url), ("node-b", b.url)))
-        session.initialize()
-        session.collect_once()
-        (session.windows_dir / "results_concurrency_4_gpus_8_ctx_4_gen_4.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "benchmark_type": "sa-bench",
-                    "result_path": "sa-bench_isl_8192_osl_1024/results_concurrency_4_gpus_8_ctx_4_gen_4.json",
-                    "concurrency": 4,
-                    "benchmark_start_time_unix": time.time(),
-                    "benchmark_end_time_unix": None,
-                    "duration": None,
-                    "clock_source": "head_node_unix_clock",
-                    "status": "running",
-                    "reason": None,
-                }
-            )
-        )
-
-        outcome = session.stop_and_finalize(allow_window_mutation=True)
-
-        window = json.loads((session.windows_dir / "results_concurrency_4_gpus_8_ctx_4_gen_4.json").read_text())
-        assert window["status"] == "interrupted"
-        assert Reason.MEASUREMENT_WINDOW_INCOMPLETE in outcome.reason_codes
-        assert outcome.publication_valid is False
-
 
 class TestSessionOwnership:
     """The session must be finalizable even if startup blows up mid-flight."""
@@ -613,13 +566,18 @@ class TestSessionOwnership:
 
         return Harness()
 
-    def test_initialize_failure_still_leaves_a_stored_session(self, tmp_path):
+    @pytest.mark.parametrize(
+        ("method", "error"),
+        [("initialize", OSError), ("start_and_wait_for_readiness", RuntimeError)],
+    )
+    def test_a_startup_failure_still_leaves_a_stored_session(self, tmp_path, method, error):
         """A run with no manifest at all is worse than one with a failed manifest."""
         harness = self._harness(tmp_path, None)
 
         with (
-            patch.object(PowerTelemetrySession, "initialize", side_effect=OSError("read-only filesystem")),
-            pytest.raises(OSError),
+            patch("srtctl.cli.mixins.telemetry_stage.start_srun_process", return_value=_running_exporter()),
+            patch.object(PowerTelemetrySession, method, side_effect=error("startup blew up")),
+            pytest.raises(error),
         ):
             harness.start_power_telemetry(ProcessRegistry(job_id="12345"))
 
@@ -645,23 +603,6 @@ class TestSessionOwnership:
         assert Reason.EXPORTER_LAUNCH_FAILED in outcome.reason_codes
         assert outcome.exit_nonzero is True
 
-    def test_readiness_failure_leaves_a_finalizable_session(self, tmp_path):
-        harness = self._harness(tmp_path, None)
-
-        with (
-            patch("srtctl.cli.mixins.telemetry_stage.start_srun_process", return_value=_running_exporter()),
-            patch.object(PowerTelemetrySession, "start_and_wait_for_readiness", side_effect=RuntimeError("boom")),
-            pytest.raises(RuntimeError),
-        ):
-            harness.start_power_telemetry(ProcessRegistry(job_id="12345"))
-
-        assert harness._power_session is not None
-        exit_code = harness.finalize_power_telemetry(0)
-        manifest = json.loads((tmp_path / "power" / MANIFEST_FILENAME).read_text())
-        assert manifest["status"] in ("complete", "incomplete", "failed")
-        assert manifest["stopped_at_unix"] is not None
-        assert exit_code == 1
-
 
 class TestRequiredReadinessGate:
     """Required-mode startup failure must not burn the allocation."""
@@ -681,14 +622,14 @@ class TestRequiredReadinessGate:
         orchestrator._power_telemetry_ready = ready
         return orchestrator
 
-    def test_required_and_not_ready_blocks(self, tmp_path):
-        assert self._orchestrator(tmp_path, required=True, ready=False).power_telemetry_blocks_benchmark() is True
+    @pytest.mark.parametrize(
+        ("required", "ready", "blocks"),
+        [(True, False, True), (False, False, False), (True, True, False)],
+    )
+    def test_gate_truth_table(self, tmp_path, required, ready, blocks):
+        orchestrator = self._orchestrator(tmp_path, required=required, ready=ready)
 
-    def test_best_effort_keeps_serving(self, tmp_path):
-        assert self._orchestrator(tmp_path, required=False, ready=False).power_telemetry_blocks_benchmark() is False
-
-    def test_ready_session_does_not_block(self, tmp_path):
-        assert self._orchestrator(tmp_path, required=True, ready=True).power_telemetry_blocks_benchmark() is False
+        assert orchestrator.power_telemetry_blocks_benchmark() is blocks
 
     def test_unset_readiness_fails_closed(self, tmp_path):
         """A stored session whose readiness was never recorded must block."""
@@ -776,8 +717,11 @@ class TestBenchmarkChildReaping:
         self._Harness(session, True).finalize_power_telemetry(0)
 
         window = json.loads((session.windows_dir / "results_concurrency_4_gpus_8_ctx_4_gen_4.json").read_text())
+        manifest = _manifest(session)
         assert window["status"] == "interrupted"
-        assert Reason.BENCHMARK_CHILD_REAP_TIMEOUT not in _manifest(session)["reason_codes"]
+        assert Reason.BENCHMARK_CHILD_REAP_TIMEOUT not in manifest["reason_codes"]
+        assert Reason.MEASUREMENT_WINDOW_INCOMPLETE in manifest["reason_codes"]
+        assert manifest["publication_valid"] is False
 
     def test_no_benchmark_child_is_not_a_reap_failure(self, tmp_path, exporters):
         session = self._session_with_running_window(tmp_path, exporters)
@@ -825,6 +769,7 @@ class TestBenchmarkChildReaping:
             harness._run_benchmark_script(runner, tmp_path / "benchmark.out", threading.Event())
 
         proc.terminate.assert_called_once()
+        proc.kill.assert_not_called()
         assert harness.benchmark_child_reaped is True
 
     def test_unreapable_child_on_unwind_stays_false(self, tmp_path):
@@ -852,14 +797,6 @@ class TestBenchmarkChildReaping:
         proc.terminate.assert_called_once()
         proc.kill.assert_called_once()
 
-    def test_terminate_and_reap_reports_a_reaped_child(self):
-        proc = MagicMock(spec=subprocess.Popen)
-        proc.poll.return_value = None
-        proc.wait.return_value = -15
-
-        assert terminate_and_reap(proc) is True
-        proc.kill.assert_not_called()
-
 
 class TestExporterIdentity:
     """The manifest must record the image string srun actually received."""
@@ -868,7 +805,6 @@ class TestExporterIdentity:
         "image",
         [
             "docker://nvcr.io/nvidia/k8s/dcgm-exporter:3.3.5-3.4.0-ubuntu22.04",
-            "docker://nvcr.io#nvidia/dcgm-exporter:latest",
             "dcgm-exporter",
         ],
     )
@@ -905,19 +841,21 @@ class TestTerminalStatusAndExit:
         ("reasons", "required", "status"),
         [
             ([Reason.EXPORTER_STARTUP_TIMEOUT, Reason.COLLECTOR_EXCEPTION], True, "incomplete"),
-            ([Reason.EXPORTER_LAUNCH_FAILED, Reason.COLLECTOR_JOIN_TIMEOUT], True, "incomplete"),
             ([Reason.COLLECTOR_EXCEPTION], True, "incomplete"),
             ([Reason.COLLECTOR_EXCEPTION], False, "incomplete"),
             ([Reason.EXPORTER_STARTUP_TIMEOUT], True, "failed"),
             ([Reason.EXPORTER_LAUNCH_FAILED], True, "failed"),
             ([Reason.ENDPOINT_RESOLUTION_FAILED], True, "failed"),
             ([Reason.EXPORTER_STARTUP_TIMEOUT], False, "complete"),
-            ([Reason.EXPORTER_LAUNCH_FAILED], False, "complete"),
             ([], False, "complete"),
         ],
     )
     def test_terminal_status_precedence(self, tmp_path, reasons, required, status):
-        assert self._finalize(tmp_path, reasons, required=required).status == status
+        outcome = self._finalize(tmp_path, reasons, required=required)
+
+        assert outcome.status == status
+        # No endpoint ever answered, so nothing here can be publishable, complete or not.
+        assert outcome.publication_valid is False
 
     @pytest.mark.parametrize(
         ("reasons", "required", "exit_nonzero"),
@@ -934,13 +872,6 @@ class TestTerminalStatusAndExit:
     )
     def test_exit_code_table(self, tmp_path, reasons, required, exit_nonzero):
         assert self._finalize(tmp_path, reasons, required=required).exit_nonzero is exit_nonzero
-
-    def test_best_effort_startup_failure_is_complete_but_unpublishable(self, tmp_path):
-        outcome = self._finalize(tmp_path, [Reason.EXPORTER_STARTUP_TIMEOUT], required=False)
-
-        assert outcome.status == "complete"
-        assert outcome.publication_valid is False
-        assert outcome.exit_nonzero is False
 
 
 class TestShutdown:

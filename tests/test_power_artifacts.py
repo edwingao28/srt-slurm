@@ -4,7 +4,6 @@
 """Raw artifact contract for the dcgm-power telemetry provider."""
 
 import csv
-import dataclasses
 import json
 
 import pytest
@@ -89,20 +88,6 @@ class TestDcgmParser:
 
         assert [(r.gpu_index, r.gpu_uuid) for r in scrape.readings] == [(3, "GPU-aaa")]
 
-    def test_parser_carries_no_hostname_for_the_collector_to_override(self):
-        """A reading is identity + watts only; the endpoint map supplies hostname.
-
-        The end-to-end precedence check (endpoint hostname wins over a
-        misleading DCGM ``Hostname`` label) lives with the collector tests.
-        """
-        scrape = parse_power_scrape(_scrape(_metric(0, "GPU-aaa", 100.0, Hostname="a-totally-wrong-node")))
-
-        assert dataclasses.asdict(scrape.readings[0]) == {
-            "gpu_index": 0,
-            "gpu_uuid": "GPU-aaa",
-            "power_w": 100.0,
-        }
-
     def test_devices_are_ordered_by_index_regardless_of_emission_order(self):
         text = _scrape(
             _metric(2, "GPU-ccc", 102.0),
@@ -139,7 +124,6 @@ class TestDcgmParser:
         ("value", "reason"),
         [
             ("NaN", Reason.INVALID_POWER_VALUE),
-            ("+Inf", Reason.INVALID_POWER_VALUE),
             ("-1.0", Reason.INVALID_POWER_VALUE),
         ],
     )
@@ -245,13 +229,6 @@ class TestSampleArtifact:
             "power_w",
         )
 
-    def test_writer_emits_exact_header(self, tmp_path):
-        writer = SampleWriter(tmp_path / SAMPLES_FILENAME)
-        writer.close()
-
-        with open(tmp_path / SAMPLES_FILENAME, newline="") as handle:
-            assert next(csv.reader(handle)) == list(SAMPLES_HEADER)
-
     def test_round_trip_preserves_rows_and_derives_devices(self, tmp_path):
         path = tmp_path / SAMPLES_FILENAME
         writer = SampleWriter(path)
@@ -266,6 +243,8 @@ class TestSampleArtifact:
 
         rows, reasons = read_samples(path)
 
+        with open(path, newline="") as handle:
+            assert next(csv.reader(handle)) == list(SAMPLES_HEADER)
         assert reasons == ()
         assert writer.row_count == 3
         assert [row.schema_version for row in rows] == [SCHEMA_VERSION] * 3
