@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import logging
 import shlex
-import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from srtctl.core.git_state import head_commit
 from srtctl.core.power.contract import Reason
 from srtctl.core.power.manifest import ExpectedWindow
 from srtctl.core.power.session import PowerSessionSettings, PowerTelemetrySession
@@ -46,18 +46,14 @@ def resolve_exporter_command(exporter_config: TelemetryExporterConfig, default_t
 
 def read_producer_commit() -> str | None:
     """The srt-slurm commit that produced the artifact, when available."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
+    located = head_commit(Path(__file__).resolve())
+    if located is None:
         return None
-    commit = result.stdout.strip()
-    return commit if result.returncode == 0 and commit else None
+    root, commit = located
+    # An installed copy nested inside an unrelated git tree must not stamp that repo's HEAD.
+    if not (root / "src" / "srtctl").is_dir():
+        return None
+    return commit
 
 
 class TelemetryStageMixin:
