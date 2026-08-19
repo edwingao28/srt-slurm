@@ -41,6 +41,7 @@ from srtctl.core.power.windows import (
 from srtctl.core.schema import (
     BenchmarkConfig,
     FrontendConfig,
+    InfraConfig,
     ModelConfig,
     ProfilingConfig,
     ProfilingPhaseConfig,
@@ -314,6 +315,36 @@ class TestWindowStates:
         assert payload["benchmark_end_time_unix"] is None
         assert payload["duration"] is None
         assert payload["reason"] == "benchmark child terminated"
+
+    def test_orchestrator_uses_the_same_interrupted_taxonomy_for_custom_agentx(self, logs):
+        stem = "agentx_concurrency_8"
+        path = logs / "power" / WINDOWS_DIRNAME / f"{stem}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "benchmark_type": "custom",
+                    "result_path": f"agentic/{stem}.json",
+                    "concurrency": 8,
+                    "benchmark_start_time_unix": 1000.0,
+                    "benchmark_end_time_unix": None,
+                    "duration": None,
+                    "clock_source": CLOCK_SOURCE,
+                    "status": "running",
+                    "reason": None,
+                }
+            )
+        )
+
+        convert_running_windows(logs / "power" / WINDOWS_DIRNAME, reason="benchmark child terminated")
+        errors = []
+        rows = _validate(logs, _samples(1000.0, 1020.0), expected=(("custom", 8),), errors=errors)
+
+        payload = json.loads(path.read_text())
+        assert payload["status"] == "interrupted"
+        assert rows[0].power_coverage_valid is False
+        assert rows[0].reason_codes == (Reason.MEASUREMENT_WINDOW_INCOMPLETE,)
+        assert errors == []
 
 
 class TestCoverageValidation:
@@ -875,6 +906,66 @@ class TestArtifactErrors:
         assert env["PROFILE_DECODE_ENDPOINTS"] == "node-d:1234"
         assert env["SA_BENCH_SLOW_DOWN_URLS"] == "http://node-d:1234"
         assert env["SRT_MEASUREMENT_WINDOW_DIR"] == "/logs/power/windows"
+
+    def test_custom_agentx_env_gets_the_formal_window_directory(self, tmp_path):
+        harness = _benchmark_harness(tmp_path, provider="dcgm-power")
+        harness.config = SrtConfig(
+            name="test",
+            model=ModelConfig(path="/model", container="/image", precision="fp8"),
+            resources=ResourceConfig(
+                gpu_type="h200",
+                prefill_nodes=1,
+                decode_nodes=1,
+                prefill_workers=1,
+                decode_workers=1,
+            ),
+            benchmark=BenchmarkConfig(
+                type="custom",
+                command="true",
+                concurrencies=[8],
+            ),
+            telemetry=harness.config.telemetry,
+            infra=InfraConfig(etcd_nats_dedicated_node=True),
+            frontend=FrontendConfig(type="sglang"),
+        )
+        harness.runtime.environment = {}
+        harness.runtime.network_interface = "eth0"
+        harness.runtime.frontend_port = 8000
+        harness.runtime.nodes.head = "node-p"
+        processes = [
+            SimpleNamespace(
+                is_leader=True,
+                endpoint_mode="prefill",
+                endpoint_index=0,
+                node_rank=0,
+                node="node-p",
+                http_port=1234,
+                sys_port=0,
+            ),
+            SimpleNamespace(
+                is_leader=True,
+                endpoint_mode="decode",
+                endpoint_index=0,
+                node_rank=0,
+                node="node-d",
+                http_port=1235,
+                sys_port=0,
+            ),
+        ]
+
+        with (
+            patch.object(BenchmarkStageMixin, "backend_processes", processes),
+            patch(
+                "srtctl.cli.mixins.benchmark_stage.get_hostname_ip",
+                side_effect=lambda node, _interface: node,
+            ),
+        ):
+            env = harness._get_benchmark_env(SimpleNamespace(name="Custom"))
+
+        assert env["SRT_MEASUREMENT_WINDOW_DIR"] == "/logs/power/windows"
+        assert env["SRT_MEASUREMENT_WINDOW_BENCHMARK_TYPE"] == "custom"
+        assert env["SRT_MEASUREMENT_WINDOW_CONCURRENCIES"] == "8"
+        assert env["SRT_MEASUREMENT_WINDOW_RESULT_ROOT"] == "/logs"
 
     def test_bench_script_saves_results_only_for_the_formal_run(self):
         script = (SA_BENCH_DIR / "bench.sh").read_text()

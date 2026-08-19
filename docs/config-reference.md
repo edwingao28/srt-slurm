@@ -919,11 +919,12 @@ infra:
 
 | Field                    | Type | Default | Description                                        |
 | ------------------------ | ---- | ------- | -------------------------------------------------- |
-| `etcd_nats_dedicated_node` | bool | false   | Reserve first node for infrastructure services     |
+| `etcd_nats_dedicated_node` | bool | false   | Reserve one node for infrastructure services       |
 
 **Notes**:
 
-- When `etcd_nats_dedicated_node: true`, the first allocated node is reserved exclusively for etcd and nats services.
+- When `etcd_nats_dedicated_node: true`, the first allocated node is normally reserved exclusively for etcd and nats services.
+- For a custom benchmark using `dcgm-power`, the actual Slurm batch host remains the logical head so the collector and benchmark share one clock. The last other worker-side node (heterogeneous group 0 for a heterogeneous job) is reserved for infrastructure instead.
 - This can improve stability for large-scale deployments by isolating infrastructure services.
 - The reserved node is not used for worker processes.
 

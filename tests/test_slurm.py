@@ -116,6 +116,61 @@ def test_srun_options_use_equals_separator() -> None:
     assert "--exclusive" in srun_cmd
 
 
+@pytest.mark.parametrize("placement_option", ["nodelist", "nodefile", "nodel", "nodef"])
+def test_explicit_nodelist_is_authoritative_over_user_placement_options(placement_option: str) -> None:
+    with (
+        patch("srtctl.core.slurm.get_slurm_job_id", return_value="12345"),
+        patch("srtctl.core.slurm._get_cluster_bash_preamble", return_value=None),
+        patch("subprocess.Popen") as mock_popen,
+    ):
+        mock_popen.return_value = MagicMock()
+        start_srun_process(
+            ["python3", "-m", "server"],
+            nodelist=["batch-host"],
+            srun_options={placement_option: "other-host"},
+        )
+
+    srun_cmd = mock_popen.call_args.args[0]
+    assert srun_cmd.index("--nodelist") > srun_cmd.index(f"--{placement_option}=other-host")
+
+
+def test_explicit_het_group_is_authoritative_over_user_option() -> None:
+    with (
+        patch("srtctl.core.slurm.get_slurm_job_id", return_value="12345"),
+        patch("srtctl.core.slurm._get_cluster_bash_preamble", return_value=None),
+        patch("subprocess.Popen") as mock_popen,
+    ):
+        mock_popen.return_value = MagicMock()
+        start_srun_process(
+            ["python3", "-m", "server"],
+            het_group=0,
+            srun_options={"het-group": "1"},
+        )
+
+    srun_cmd = mock_popen.call_args.args[0]
+    assert srun_cmd.index("--het-group=0") > srun_cmd.index("--het-group=1")
+
+
+@pytest.mark.parametrize(("option", "authoritative"), [("nodes", "1"), ("ntasks", "1")])
+def test_explicit_task_shape_is_authoritative_over_user_options(option: str, authoritative: str) -> None:
+    with (
+        patch("srtctl.core.slurm.get_slurm_job_id", return_value="12345"),
+        patch("srtctl.core.slurm._get_cluster_bash_preamble", return_value=None),
+        patch("subprocess.Popen") as mock_popen,
+    ):
+        mock_popen.return_value = MagicMock()
+        start_srun_process(
+            ["python3", "-m", "server"],
+            nodes=1,
+            ntasks=1,
+            srun_options={option: "2"},
+        )
+
+    srun_cmd = mock_popen.call_args.args[0]
+    assert srun_cmd.index(f"--{option}") > srun_cmd.index(f"--{option}=2")
+    assert srun_cmd[srun_cmd.index(f"--{option}") + 1] == authoritative
+
+
 def test_srun_export_env_renders_export_with_all_prefix() -> None:
     with (
         patch("srtctl.core.slurm.get_slurm_job_id", return_value="12345"),

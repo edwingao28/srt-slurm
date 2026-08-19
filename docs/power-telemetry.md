@@ -12,18 +12,21 @@ window themselves.
 - One DCGM exporter task runs on each allocated worker node, launched through
   the normal SLURM/process-registry path (one `srun` per heterogeneous group).
 - A collector thread inside the orchestrator polls every exporter concurrently
-  from the physical head node, so all sample timestamps and benchmark
-  boundaries come from one clock.
+  from the actual Slurm batch host. Power-enabled custom jobs map that host to
+  the logical head, so all sample timestamps and benchmark boundaries come
+  from one clock even when a dedicated infrastructure node is requested.
 - Only `DCGM_FI_DEV_POWER_USAGE` is parsed. Device identity comes from the
   `gpu` and `UUID` labels.
-- SA-Bench writes one measurement-window file per measured concurrency. Warmup
-  omits `--save-result`, so it never writes a window.
+- SA-Bench writes one measurement-window file per measured concurrency. A
+  custom benchmark receives the formal window contract through reserved
+  environment variables and must write the same files itself. Warmup must not
+  write a window.
 
 ## Configuration
 
 ```yaml
 benchmark:
-  type: sa-bench          # the only v1 measurement-window adapter
+  type: sa-bench          # custom is also supported; see below
   client_placement: head  # keeps sample and window clocks on one host
   isl: 8192
   osl: 1024
@@ -51,6 +54,28 @@ inconsistent values with actionable messages; in particular
 accepts, or every window would fail `sample_gap_exceeded`. Telemetry stays
 disabled by default and existing `provider: scraper` recipes are unchanged.
 
+For `benchmark.type: custom`, `client_placement: head` and a non-empty list of
+unique positive `concurrencies` are required. srtctl injects these reserved
+variables into the benchmark process after user-provided benchmark variables,
+so the formal contract cannot be overridden:
+
+```text
+SRT_MEASUREMENT_WINDOW_DIR=/logs/<storage_subdir>/windows
+SRT_MEASUREMENT_WINDOW_BENCHMARK_TYPE=custom
+SRT_MEASUREMENT_WINDOW_CONCURRENCIES="<space-separated decimal values>"
+SRT_MEASUREMENT_WINDOW_RESULT_ROOT=/logs
+```
+
+The custom command must write one boundary-identical result/window pair for
+each listed measured concurrency. `srun_options.nodelist`,
+`srun_options.nodefile`, and top-level overrides of the Slurm allocation
+environment are rejected because they could move the benchmark away from the
+collector clock. `sbatch_directives.batch` is supported: runtime placement
+uses Slurm's authoritative `SLURMD_NODENAME`, validates that it belongs to the
+allocation (heterogeneous group 0 for a heterogeneous job), and keeps it as
+head. With `etcd_nats_dedicated_node: true`, the last non-head worker-side node
+is reserved for infrastructure.
+
 ## Artifacts
 
 ```text
@@ -75,7 +100,7 @@ coverage validation, and reason codes. `status` is the lifecycle outcome;
 machine-readable strings enumerated in `srtctl/core/power/contract.py`.
 
 A window file records the formal benchmark boundaries on the head-node Unix
-clock plus a monotonic `duration`, and points at the SA-Bench result it
+clock plus a monotonic `duration`, and points at the benchmark result it
 brackets; result and window are boundary-identical.
 
 With `required: true`, all artifacts are written first and the job then exits

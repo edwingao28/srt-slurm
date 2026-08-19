@@ -16,13 +16,12 @@ import pytest
 from srtctl.cli.do_sweep import SweepOrchestrator
 from srtctl.cli.mixins.benchmark_stage import BenchmarkStageMixin
 from srtctl.cli.mixins.telemetry_stage import TelemetryStageMixin
-from srtctl.core.processes import terminate_and_reap
 from srtctl.core.power.contract import MANIFEST_FILENAME, SAMPLES_FILENAME, WINDOWS_DIRNAME, Reason
 from srtctl.core.power.manifest import ExpectedWindow
 from srtctl.core.power.samples import read_samples
 from srtctl.core.power.session import PowerEndpoint, PowerSessionSettings, PowerTelemetrySession
 from srtctl.core.power.topology import build_expected_devices
-from srtctl.core.processes import ManagedProcess, ProcessRegistry
+from srtctl.core.processes import ManagedProcess, ProcessRegistry, terminate_and_reap
 from srtctl.core.schema import TelemetryExporterConfig, TelemetryProvider
 from srtctl.core.topology import Process
 
@@ -787,6 +786,36 @@ class TestBenchmarkChildReaping:
             harness._run_benchmark_script(runner, tmp_path / "benchmark.out", threading.Event())
 
         assert harness.benchmark_child_reaped is False
+
+    def test_custom_runner_cannot_override_formal_window_environment(self, tmp_path):
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = 0
+        proc.returncode = 0
+        harness, runner = self._bench_harness(tmp_path, proc)
+        harness.config.benchmark.type = "custom"
+        formal_env = {
+            "SRT_MEASUREMENT_WINDOW_DIR": "/logs/power/windows",
+            "SRT_MEASUREMENT_WINDOW_BENCHMARK_TYPE": "custom",
+            "SRT_MEASUREMENT_WINDOW_CONCURRENCIES": "8",
+            "SRT_MEASUREMENT_WINDOW_RESULT_ROOT": "/logs",
+        }
+        harness._get_benchmark_env = MagicMock(side_effect=lambda _runner: dict(formal_env))
+        harness._get_custom_measurement_window_env = MagicMock(side_effect=lambda: dict(formal_env))
+        runner.name = "Custom"
+        runner.get_environment.return_value = {
+            "SRT_MEASUREMENT_WINDOW_DIR": "/tmp/forged",
+            "SRT_MEASUREMENT_WINDOW_CONCURRENCIES": "999",
+        }
+
+        with (
+            patch("srtctl.cli.mixins.benchmark_stage.start_srun_process", return_value=proc) as start,
+            patch("srtctl.analysis.live_metrics.try_start_snapshotter", return_value=None),
+        ):
+            harness._run_benchmark_script(runner, tmp_path / "benchmark.out", threading.Event())
+
+        env = start.call_args.kwargs["env_to_set"]
+        assert env["SRT_MEASUREMENT_WINDOW_DIR"] == "/logs/power/windows"
+        assert env["SRT_MEASUREMENT_WINDOW_CONCURRENCIES"] == "8"
 
     def test_terminate_and_reap_reports_an_unreapable_child(self):
         proc = MagicMock(spec=subprocess.Popen)
