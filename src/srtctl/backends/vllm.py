@@ -32,6 +32,7 @@ from srtctl.ports import (
     MOONCAKE_MASTER_PORT,
     VLLM_DATA_PARALLEL_RPC_PORT,
     VLLM_PORT_BASE,
+    VLLM_PORT_END,
     VLLM_PORT_STRIDE,
 )
 
@@ -353,7 +354,13 @@ class VLLMProtocol:
         # two endpoints share one physical node and would otherwise scan
         # overlapping get_open_port() ranges.
         proc_index = max(process.sys_port - DYN_SYSTEM_PORT_BASE, 0)
-        env["VLLM_PORT"] = str(VLLM_PORT_BASE + proc_index * VLLM_PORT_STRIDE)
+        vllm_port = VLLM_PORT_BASE + proc_index * VLLM_PORT_STRIDE
+        if vllm_port + VLLM_PORT_STRIDE - 1 > VLLM_PORT_END:
+            raise ValueError(
+                f"VLLM process port range exhausted at process index {proc_index}: "
+                f"the reserved range ends at {VLLM_PORT_END}"
+            )
+        env["VLLM_PORT"] = str(vllm_port)
         return env
 
     def get_mooncake_worker_env(self, infra_node_ip: str, local_hostname: str) -> dict[str, str]:

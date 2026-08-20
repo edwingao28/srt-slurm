@@ -3,9 +3,17 @@
 
 """Tests for per-process VLLM_PORT assignment (rendezvous EADDRINUSE avoidance)."""
 
+import pytest
+
 from srtctl.backends.vllm import VLLMProtocol
 from srtctl.core.topology import Process
-from srtctl.ports import DYN_SYSTEM_PORT_BASE, VLLM_PORT_BASE, VLLM_PORT_STRIDE
+from srtctl.ports import (
+    DYN_SYSTEM_PORT_BASE,
+    KV_EVENTS_PORT_BASE,
+    VLLM_PORT_BASE,
+    VLLM_PORT_END,
+    VLLM_PORT_STRIDE,
+)
 
 
 def _process(sys_port: int) -> Process:
@@ -45,3 +53,19 @@ def test_vllm_port_clamps_when_sys_port_below_anchor():
     env = backend.get_process_environment(_process(DYN_SYSTEM_PORT_BASE - 10))
 
     assert env["VLLM_PORT"] == str(VLLM_PORT_BASE)
+
+
+def test_vllm_port_windows_fail_before_the_kv_events_range():
+    backend = VLLMProtocol()
+    last_process_index = (VLLM_PORT_END - VLLM_PORT_BASE + 1) // VLLM_PORT_STRIDE - 1
+
+    env = backend.get_process_environment(
+        _process(DYN_SYSTEM_PORT_BASE + last_process_index)
+    )
+
+    assert int(env["VLLM_PORT"]) + VLLM_PORT_STRIDE - 1 == VLLM_PORT_END
+    assert VLLM_PORT_END < KV_EVENTS_PORT_BASE
+    with pytest.raises(ValueError, match="VLLM process port range exhausted"):
+        backend.get_process_environment(
+            _process(DYN_SYSTEM_PORT_BASE + last_process_index + 1)
+        )

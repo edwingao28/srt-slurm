@@ -25,11 +25,13 @@ from typing import Literal
 from srtctl.ports import (
     DYN_SYSTEM_PORT_BASE,
     KV_EVENTS_PORT_BASE,
+    KV_EVENTS_PORT_END,
     SGLANG_BOOTSTRAP_PORT_BASE,
     SGLANG_HTTP_PORT_BASE,
     SGLANG_HTTP_PORT_STRIDE,
     VLLM_DATA_PARALLEL_RPC_PORT,
     VLLM_NIXL_PORT_BASE,
+    VLLM_NIXL_PORT_END,
 )
 
 # Worker mode type
@@ -45,8 +47,8 @@ class NodePortAllocator:
     assignments per node and hands out the next available port.
 
     Default port ranges (non-overlapping):
-        - kv_events_port: 5200+ (global) - ZMQ port for kv-events publishing
-        - nixl_port:      5400+ (global) - NIXL side channel for KV transfers (vLLM)
+        - kv_events_port: 28000-28999 (global) - ZMQ port for kv-events publishing
+        - nixl_port:      30000-31999 (global) - NIXL side channel for KV transfers (vLLM)
         - dp_rpc_port:    8400+ (per node) - DP coordination port (vLLM data-parallel)
         - http_port:      6100+ (per node) - HTTP serving port
         - bootstrap_port: 7200+ (per node) - P/D coordination port (prefill only)
@@ -65,7 +67,9 @@ class NodePortAllocator:
     base_http_port: int = SGLANG_HTTP_PORT_BASE
     base_bootstrap_port: int = SGLANG_BOOTSTRAP_PORT_BASE
     base_kv_events_port: int = KV_EVENTS_PORT_BASE
+    kv_events_port_end: int = KV_EVENTS_PORT_END
     base_nixl_port: int = VLLM_NIXL_PORT_BASE
+    nixl_port_end: int = VLLM_NIXL_PORT_END
     base_dp_rpc_port: int = VLLM_DATA_PARALLEL_RPC_PORT
 
     _http_ports: dict[str, int] = field(default_factory=dict, repr=False)
@@ -92,11 +96,7 @@ class NodePortAllocator:
 
     def next_kv_events_port(self) -> int:
         """Get next available kv-events ZMQ port (globally unique across all nodes)."""
-        if self._next_kv_events_port == 0:
-            self._next_kv_events_port = self.base_kv_events_port
-        port = self._next_kv_events_port
-        self._next_kv_events_port += 1
-        return port
+        return self.next_kv_events_port_block(1)
 
     def next_kv_events_port_block(self, size: int) -> int:
         """Reserve consecutive KV-event ports and return the base port.
@@ -109,16 +109,17 @@ class NodePortAllocator:
         if self._next_kv_events_port == 0:
             self._next_kv_events_port = self.base_kv_events_port
         port = self._next_kv_events_port
+        if port + size - 1 > self.kv_events_port_end:
+            raise ValueError(
+                f"KV-event port range exhausted: requested {size} ports from {port}, "
+                f"but the reserved range ends at {self.kv_events_port_end}"
+            )
         self._next_kv_events_port += size
         return port
 
     def next_nixl_port(self) -> int:
         """Get next available NIXL side channel port (globally unique across all nodes)."""
-        if self._next_nixl_port == 0:
-            self._next_nixl_port = self.base_nixl_port
-        port = self._next_nixl_port
-        self._next_nixl_port += 1
-        return port
+        return self.next_nixl_port_block(1)
 
     def next_nixl_port_block(self, size: int) -> int:
         """Reserve a block of consecutive NIXL ports, return the base port.
@@ -128,9 +129,16 @@ class NodePortAllocator:
         All DP ranks within an endpoint share the same base port, so we
         must reserve `size` ports to avoid collisions with other endpoints.
         """
+        if size < 1:
+            raise ValueError("NIXL port block size must be at least 1")
         if self._next_nixl_port == 0:
             self._next_nixl_port = self.base_nixl_port
         port = self._next_nixl_port
+        if port + size - 1 > self.nixl_port_end:
+            raise ValueError(
+                f"NIXL port range exhausted: requested {size} ports from {port}, "
+                f"but the reserved range ends at {self.nixl_port_end}"
+            )
         self._next_nixl_port += size
         return port
 

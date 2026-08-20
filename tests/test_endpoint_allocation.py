@@ -14,10 +14,12 @@ from srtctl.core.topology import (
 from srtctl.ports import (
     DYN_SYSTEM_PORT_BASE,
     KV_EVENTS_PORT_BASE,
+    KV_EVENTS_PORT_END,
     SGLANG_BOOTSTRAP_PORT_BASE,
     SGLANG_HTTP_PORT_BASE,
     SGLANG_HTTP_PORT_STRIDE,
     VLLM_NIXL_PORT_BASE,
+    VLLM_NIXL_PORT_END,
 )
 
 
@@ -441,6 +443,23 @@ class TestDefaultPorts:
         assert allocator.base_bootstrap_port == SGLANG_BOOTSTRAP_PORT_BASE
         assert allocator.base_kv_events_port == KV_EVENTS_PORT_BASE
         assert allocator.base_nixl_port == VLLM_NIXL_PORT_BASE
+
+    def test_high_port_ranges_are_disjoint_and_fail_closed(self):
+        allocator = NodePortAllocator()
+
+        assert 9000 < KV_EVENTS_PORT_BASE <= KV_EVENTS_PORT_END
+        assert KV_EVENTS_PORT_END < VLLM_NIXL_PORT_BASE <= VLLM_NIXL_PORT_END
+        assert VLLM_NIXL_PORT_END < 32768
+
+        kv_capacity = KV_EVENTS_PORT_END - KV_EVENTS_PORT_BASE + 1
+        assert allocator.next_kv_events_port_block(kv_capacity) == KV_EVENTS_PORT_BASE
+        with pytest.raises(ValueError, match="KV-event port range exhausted"):
+            allocator.next_kv_events_port()
+
+        nixl_capacity = VLLM_NIXL_PORT_END - VLLM_NIXL_PORT_BASE + 1
+        assert allocator.next_nixl_port_block(nixl_capacity) == VLLM_NIXL_PORT_BASE
+        with pytest.raises(ValueError, match="NIXL port range exhausted"):
+            allocator.next_nixl_port()
 
     def test_http_ports_use_centralized_stride(self):
         allocator = NodePortAllocator()

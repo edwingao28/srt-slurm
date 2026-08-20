@@ -2593,6 +2593,7 @@ class TestVLLMDataParallelMode:
 
         from srtctl.backends import VLLMProtocol
         from srtctl.core.topology import Process
+        from srtctl.ports import DYN_SYSTEM_PORT_BASE
 
         backend = VLLMProtocol()
 
@@ -2600,7 +2601,7 @@ class TestVLLMDataParallelMode:
         process = Process(
             node="node0",
             gpu_indices=frozenset([0]),
-            sys_port=8081,
+            sys_port=DYN_SYSTEM_PORT_BASE,
             http_port=30000,
             endpoint_mode="prefill",
             endpoint_index=0,
@@ -2620,13 +2621,14 @@ class TestVLLMDataParallelMode:
         """Test vLLM handles None ports gracefully."""
         from srtctl.backends import VLLMProtocol
         from srtctl.core.topology import Process
+        from srtctl.ports import DYN_SYSTEM_PORT_BASE
 
         backend = VLLMProtocol()
 
         process = Process(
             node="node0",
             gpu_indices=frozenset([0]),
-            sys_port=8081,
+            sys_port=DYN_SYSTEM_PORT_BASE,
             http_port=30000,
             endpoint_mode="prefill",
             endpoint_index=0,
