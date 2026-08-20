@@ -12,9 +12,10 @@ window themselves.
 - One DCGM exporter task runs on each allocated worker node, launched through
   the normal SLURM/process-registry path (one `srun` per heterogeneous group).
 - A collector thread inside the orchestrator polls every exporter concurrently
-  from the actual Slurm batch host. Power-enabled custom jobs map that host to
-  the logical head, so all sample timestamps and benchmark boundaries come
-  from one clock even when a dedicated infrastructure node is requested.
+  from the actual Slurm batch host. Power-enabled SA-Bench and custom jobs map
+  that host to the logical head, so all sample timestamps and benchmark
+  boundaries come from one clock even when a dedicated infrastructure node is
+  requested.
 - Only `DCGM_FI_DEV_POWER_USAGE` is parsed. Device identity comes from the
   `gpu` and `UUID` labels.
 - SA-Bench writes one measurement-window file per measured concurrency. A
@@ -67,14 +68,15 @@ SRT_MEASUREMENT_WINDOW_RESULT_ROOT=/logs
 ```
 
 The custom command must write one boundary-identical result/window pair for
-each listed measured concurrency. `srun_options.nodelist`,
-`srun_options.nodefile`, and top-level overrides of the Slurm allocation
-environment are rejected because they could move the benchmark away from the
-collector clock. `sbatch_directives.batch` is supported: runtime placement
-uses Slurm's authoritative `SLURMD_NODENAME`, validates that it belongs to the
-allocation (heterogeneous group 0 for a heterogeneous job), and keeps it as
-head. With `etcd_nats_dedicated_node: true`, the last non-head worker-side node
-is reserved for infrastructure.
+each listed measured concurrency. For both supported benchmark types,
+`srun_options.nodelist`, `srun_options.nodefile`, and top-level overrides of
+the Slurm allocation environment are rejected because they could move the
+benchmark away from the collector clock. `sbatch_directives.batch` is
+supported: runtime placement uses Slurm's authoritative `SLURMD_NODENAME`,
+validates that it belongs to the allocation (heterogeneous group 0 for a
+heterogeneous job), and keeps it as head. With
+`etcd_nats_dedicated_node: true`, the last non-head worker-side node is
+reserved for infrastructure.
 
 ## Artifacts
 

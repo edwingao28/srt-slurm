@@ -101,6 +101,19 @@ class TestDcgmPowerConfig:
         assert config.benchmark.type == "custom"
         assert config.infra.etcd_nats_dedicated_node is True
 
+    def test_accepts_sa_bench_with_dedicated_infra(self):
+        config = SrtConfig(
+            name="test",
+            model=ModelConfig(path="/model", container="/image", precision="fp4"),
+            resources=ResourceConfig(gpu_type="h100"),
+            benchmark=_sa_bench(),
+            telemetry=_dcgm_power(),
+            infra=InfraConfig(etcd_nats_dedicated_node=True),
+        )
+
+        assert config.benchmark.type == "sa-bench"
+        assert config.infra.etcd_nats_dedicated_node is True
+
     def test_custom_agentx_rejects_measurement_window_contract_override(self):
         fields = {
             "name": "test",
@@ -116,14 +129,15 @@ class TestDcgmPowerConfig:
         with pytest.raises(ValidationError, match="SRT_MEASUREMENT_WINDOW_DIR"):
             SrtConfig(**fields)
 
+    @pytest.mark.parametrize("benchmark", [_custom_agentx(), _sa_bench()], ids=["custom", "sa-bench"])
     @pytest.mark.parametrize("option", ["nodelist", "nodefile"])
-    def test_custom_agentx_rejects_benchmark_nodelist_override(self, option):
+    def test_dcgm_power_rejects_benchmark_nodelist_override(self, benchmark, option):
         with pytest.raises(ValidationError, match="srun_options"):
             SrtConfig(
                 name="test",
                 model=ModelConfig(path="/model", container="/image", precision="fp4"),
                 resources=ResourceConfig(gpu_type="h100"),
-                benchmark=_custom_agentx(),
+                benchmark=benchmark,
                 telemetry=_dcgm_power(),
                 srun_options={option: "node-b"},
             )
@@ -138,13 +152,14 @@ class TestDcgmPowerConfig:
             "SLURM_JOB_NODELIST_HET_GROUP_7",
         ],
     )
-    def test_custom_agentx_rejects_slurm_allocation_environment_override(self, variable):
+    @pytest.mark.parametrize("benchmark", [_custom_agentx(), _sa_bench()], ids=["custom", "sa-bench"])
+    def test_dcgm_power_rejects_slurm_allocation_environment_override(self, benchmark, variable):
         with pytest.raises(ValidationError, match=variable):
             SrtConfig(
                 name="test",
                 model=ModelConfig(path="/model", container="/image", precision="fp4"),
                 resources=ResourceConfig(gpu_type="h100"),
-                benchmark=_custom_agentx(),
+                benchmark=benchmark,
                 telemetry=_dcgm_power(),
                 environment={variable: "forged-allocation"},
             )
@@ -264,7 +279,7 @@ class TestDcgmPowerConfig:
     @pytest.mark.parametrize(
         ("telemetry", "benchmark", "dedicated", "rejected"),
         [
-            (_dcgm_power(), _sa_bench(), True, True),
+            (_dcgm_power(), _sa_bench(), True, False),
             (_dcgm_power(), _sa_bench(), False, False),
             (
                 TelemetryConfig(
@@ -280,7 +295,7 @@ class TestDcgmPowerConfig:
         ],
         ids=["dcgm-power-dedicated", "dcgm-power-shared", "scraper-dedicated"],
     )
-    def test_a_dedicated_infra_node_is_rejected_only_for_dcgm_power(self, telemetry, benchmark, dedicated, rejected):
+    def test_dedicated_infra_support_matches_provider_contract(self, telemetry, benchmark, dedicated, rejected):
         def build():
             return SrtConfig(
                 name="test",

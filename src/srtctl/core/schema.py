@@ -1560,7 +1560,7 @@ class InfraConfig:
     Attributes:
         etcd_nats_dedicated_node: If True, run etcd and nats on a dedicated node
             instead of the head node. This normally reserves the first node.
-            A custom benchmark using dcgm-power keeps the actual Slurm batch
+            A supported benchmark using dcgm-power keeps the actual Slurm batch
             host as head and reserves the last other worker-side node instead.
             Default: False.
         nats_max_payload_mb: Maximum NATS message payload in MB. Default: None (uses
@@ -1866,8 +1866,8 @@ class SrtConfig:
 
         It runs its collector in the batch process, so it needs neither the
         scraper image nor node_exporter. Sample and window timestamps share the
-        head-node clock. Custom benchmarks keep the batch host as head when an
-        otherwise-dedicated infrastructure node is requested.
+        head-node clock. Supported benchmarks keep the batch host as head when
+        an otherwise-dedicated infrastructure node is requested.
         """
         telemetry = self.telemetry
         exporter = telemetry.dcgm_exporter
@@ -1909,18 +1909,10 @@ class SrtConfig:
         if self.benchmark.client_placement != "head":
             raise ValidationError("telemetry provider dcgm-power requires benchmark.client_placement: head")
 
-        # SA-Bench preserves its existing topology; custom benchmarks opt into
-        # the batch-host-as-head mapping when the runtime is constructed.
-        if self.infra.etcd_nats_dedicated_node and not custom_agentx:
-            raise ValidationError(
-                "telemetry provider dcgm-power requires infra.etcd_nats_dedicated_node: false, because a "
-                "dedicated infra node moves nodes.head off the batch host and power samples would no longer "
-                "share the benchmark's clock"
-            )
         placement_options = sorted({"nodefile", "nodelist"}.intersection(self.srun_options))
-        if custom_agentx and placement_options:
+        if placement_options:
             raise ValidationError(
-                "telemetry provider dcgm-power with benchmark.type: custom does not allow "
+                "telemetry provider dcgm-power does not allow "
                 "srun_options placement keys because the benchmark must run on the collector's batch host: "
                 + ", ".join(placement_options)
             )
@@ -1929,11 +1921,10 @@ class SrtConfig:
             for key in self.environment
             if key in _CUSTOM_POWER_RESERVED_SLURM_ENV or key.startswith("SLURM_JOB_NODELIST_HET_GROUP_")
         )
-        if custom_agentx and reserved_slurm_env:
+        if reserved_slurm_env:
             raise ValidationError(
-                "telemetry provider dcgm-power with benchmark.type: custom reserves environment keys "
-                "for authoritative Slurm allocation and batch-host placement: "
-                + ", ".join(reserved_slurm_env)
+                "telemetry provider dcgm-power reserves environment keys "
+                "for authoritative Slurm allocation and batch-host placement: " + ", ".join(reserved_slurm_env)
             )
         reserved_env = sorted(_CUSTOM_POWER_RESERVED_ENV.intersection(self.benchmark.env))
         if custom_agentx and reserved_env:

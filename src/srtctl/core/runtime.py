@@ -262,11 +262,7 @@ class RuntimeContext:
             log_dir_base: Base directory for logs (default: ./outputs)
         """
         # Get nodes from SLURM
-        batch_host_as_head = (
-            config.telemetry.enabled
-            and config.telemetry.provider == "dcgm-power"
-            and config.benchmark.type == "custom"
-        )
+        batch_host_as_head = config.telemetry.enabled and config.telemetry.provider == "dcgm-power"
         nodes = Nodes.from_slurm(
             benchmark_on_separate_node=False,
             etcd_nats_dedicated_node=config.infra.etcd_nats_dedicated_node,
