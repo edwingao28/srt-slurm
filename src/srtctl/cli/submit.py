@@ -57,6 +57,7 @@ from srtctl.core.git_state import (
 from srtctl.core.lockfile import load_lockfile_fingerprints
 from srtctl.core.schema import SrtConfig, TelemetryProvider, installs_dynamo
 from srtctl.core.status import create_job_record
+from srtctl.core.topology import preflight_topology_ports
 from srtctl.core.validation import preflight_config_variants
 from srtctl.ports import MOONCAKE_MASTER_PORT
 
@@ -585,6 +586,11 @@ def submit_with_orchestrator(
 
     if config is None:
         config = load_config(config_path)
+
+    preflight_topology_ports(
+        config,
+        cluster_default_het_jobs=get_srtslurm_setting("use_het_jobs", False),
+    )
 
     runtime_config_filename = "config.yaml"
     resolved_runtime_config_text: str | None = None

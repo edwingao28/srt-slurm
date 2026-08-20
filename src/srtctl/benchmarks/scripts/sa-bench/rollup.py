@@ -36,6 +36,7 @@ OUTPUT_FIELDS = [
 ]
 
 RUNNING_REQ_PATTERN = re.compile(r"#running-req:\s*(\d+)")
+RESOURCE_SNAPSHOT_FILENAME = "resource_snapshot.json"
 
 
 def _safe_get(data: dict[str, Any], keys: list[str], default: Any = None) -> Any:
@@ -79,14 +80,16 @@ def _p99(data: dict[str, Any], metric: str) -> float | None:
 
 
 def _looks_like_job_metadata(data: Any) -> bool:
-    """Heuristic: submit metadata carries a job_id / resources / benchmark block.
+    """Return whether a JSON object has the authoritative submit-metadata shape.
 
     Guards against sibling JSON files (benchmark-rollup.json, fingerprint_*.json,
-    postprocess-status.json) that live next to the metadata in a flat layout.
+    postprocess-status.json, resource_snapshot.json) that live next to metadata.
+    Legacy submit metadata may lack ``benchmark``, but always carries the resource
+    block plus job/backend identity used by this rollup.
     """
     if not isinstance(data, dict):
         return False
-    return "job_id" in data or "resources" in data or "benchmark" in data
+    return "resources" in data and any(key in data for key in ("job_id", "job_name", "backend_type", "benchmark"))
 
 
 def _read_job_metadata(log_dir: Path) -> dict[str, Any] | None:
@@ -102,6 +105,8 @@ def _read_job_metadata(log_dir: Path) -> dict[str, Any] | None:
 
     for search_dir in search_dirs:
         for metadata_path in sorted(search_dir.glob("*.json")):
+            if metadata_path.name == RESOURCE_SNAPSHOT_FILENAME:
+                continue
             try:
                 data = json.loads(metadata_path.read_text())
             except (OSError, UnicodeError, json.JSONDecodeError) as exc:

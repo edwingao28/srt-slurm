@@ -126,8 +126,8 @@ def test_sa_bench_rollup_generates_json_and_csv_without_metadata(tmp_path):
     assert first["Total Token Throughput per GPU"] == ""
 
 
-def test_sa_bench_rollup_reads_isl_osl_from_metadata_for_fixed_workload(tmp_path):
-    """Fixed sa-bench workloads carry integer ISL/OSL in metadata.benchmark."""
+def test_sa_bench_rollup_uses_parent_metadata_with_resource_snapshot_sibling(tmp_path):
+    """Production resource snapshots must not shadow authoritative parent metadata."""
     rollup = _load_rollup_module()
 
     logs_dir = tmp_path / "logs"
@@ -137,10 +137,21 @@ def test_sa_bench_rollup_reads_isl_osl_from_metadata_for_fixed_workload(tmp_path
     (tmp_path / "2279646.json").write_text(
         json.dumps(
             {
+                "job_id": "2279646",
                 "job_name": "fixed-isl-osl-run",
                 "backend_type": "vllm",
                 "resources": {"gpus_per_node": 4, "prefill_nodes": 4, "decode_nodes": 2},
                 "benchmark": {"type": "sa-bench", "isl": 8192, "osl": 1024},
+            }
+        )
+    )
+    (logs_dir / "resource_snapshot.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "job_id": "2279646",
+                "hardware": {"architecture": "x86_64"},
+                "nodes": {"count": 6},
             }
         )
     )
