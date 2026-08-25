@@ -20,17 +20,22 @@ After (Python):
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from srtctl.ports import (
     DYN_SYSTEM_PORT_BASE,
     KV_EVENTS_PORT_BASE,
+    KV_EVENTS_PORT_END,
     SGLANG_BOOTSTRAP_PORT_BASE,
     SGLANG_HTTP_PORT_BASE,
     SGLANG_HTTP_PORT_STRIDE,
     VLLM_DATA_PARALLEL_RPC_PORT,
     VLLM_NIXL_PORT_BASE,
+    VLLM_NIXL_PORT_END,
 )
+
+if TYPE_CHECKING:
+    from srtctl.core.schema import SrtConfig
 
 # Worker mode type
 WorkerMode = Literal["prefill", "decode", "agg"]
@@ -45,8 +50,8 @@ class NodePortAllocator:
     assignments per node and hands out the next available port.
 
     Default port ranges (non-overlapping):
-        - kv_events_port: 5200+ (global) - ZMQ port for kv-events publishing
-        - nixl_port:      5400+ (global) - NIXL side channel for KV transfers (vLLM)
+        - kv_events_port: 28000-28999 (global) - ZMQ port for kv-events publishing
+        - nixl_port:      30000-31999 (global) - NIXL side channel for KV transfers (vLLM)
         - dp_rpc_port:    8400+ (per node) - DP coordination port (vLLM data-parallel)
         - http_port:      6100+ (per node) - HTTP serving port
         - bootstrap_port: 7200+ (per node) - P/D coordination port (prefill only)
@@ -65,7 +70,9 @@ class NodePortAllocator:
     base_http_port: int = SGLANG_HTTP_PORT_BASE
     base_bootstrap_port: int = SGLANG_BOOTSTRAP_PORT_BASE
     base_kv_events_port: int = KV_EVENTS_PORT_BASE
+    kv_events_port_end: int = KV_EVENTS_PORT_END
     base_nixl_port: int = VLLM_NIXL_PORT_BASE
+    nixl_port_end: int = VLLM_NIXL_PORT_END
     base_dp_rpc_port: int = VLLM_DATA_PARALLEL_RPC_PORT
 
     _http_ports: dict[str, int] = field(default_factory=dict, repr=False)
@@ -92,11 +99,7 @@ class NodePortAllocator:
 
     def next_kv_events_port(self) -> int:
         """Get next available kv-events ZMQ port (globally unique across all nodes)."""
-        if self._next_kv_events_port == 0:
-            self._next_kv_events_port = self.base_kv_events_port
-        port = self._next_kv_events_port
-        self._next_kv_events_port += 1
-        return port
+        return self.next_kv_events_port_block(1)
 
     def next_kv_events_port_block(self, size: int) -> int:
         """Reserve consecutive KV-event ports and return the base port.
@@ -109,16 +112,17 @@ class NodePortAllocator:
         if self._next_kv_events_port == 0:
             self._next_kv_events_port = self.base_kv_events_port
         port = self._next_kv_events_port
+        if port + size - 1 > self.kv_events_port_end:
+            raise ValueError(
+                f"KV-event port range exhausted: requested {size} ports from {port}, "
+                f"but the reserved range ends at {self.kv_events_port_end}"
+            )
         self._next_kv_events_port += size
         return port
 
     def next_nixl_port(self) -> int:
         """Get next available NIXL side channel port (globally unique across all nodes)."""
-        if self._next_nixl_port == 0:
-            self._next_nixl_port = self.base_nixl_port
-        port = self._next_nixl_port
-        self._next_nixl_port += 1
-        return port
+        return self.next_nixl_port_block(1)
 
     def next_nixl_port_block(self, size: int) -> int:
         """Reserve a block of consecutive NIXL ports, return the base port.
@@ -128,9 +132,16 @@ class NodePortAllocator:
         All DP ranks within an endpoint share the same base port, so we
         must reserve `size` ports to avoid collisions with other endpoints.
         """
+        if size < 1:
+            raise ValueError("NIXL port block size must be at least 1")
         if self._next_nixl_port == 0:
             self._next_nixl_port = self.base_nixl_port
         port = self._next_nixl_port
+        if port + size - 1 > self.nixl_port_end:
+            raise ValueError(
+                f"NIXL port range exhausted: requested {size} ports from {port}, "
+                f"but the reserved range ends at {self.nixl_port_end}"
+            )
         self._next_nixl_port += size
         return port
 
@@ -237,6 +248,13 @@ class Process:
     def cuda_visible_devices(self) -> str:
         """CUDA_VISIBLE_DEVICES string for this process."""
         return ",".join(str(i) for i in sorted(self.gpu_indices))
+
+
+def validate_backend_process_ports(backend: object, processes: Sequence[Process]) -> None:
+    """Run a backend's pure process-port validation hook when it provides one."""
+    validate_process_ports = getattr(backend, "validate_process_ports", None)
+    if validate_process_ports is not None:
+        validate_process_ports(processes)
 
 
 def ordered_decode_leader_nodes(processes: list[Process]) -> list[str]:
@@ -534,6 +552,50 @@ def allocate_endpoints_het(
             )
         )
     return tagged
+
+
+def preflight_topology_ports(config: "SrtConfig", *, cluster_default_het_jobs: bool = False) -> list[Process]:
+    """Build the complete process topology and validate bounded port allocations.
+
+    Submission does not know the allocated hostnames yet, so deterministic
+    placeholders model the exact worker-node counts. The backend performs the
+    same endpoint packing and process/port allocation used inside the batch job.
+    """
+    resources = config.resources
+    het_components = resources.het_components(
+        infra_dedicated=config.infra.etcd_nats_dedicated_node,
+        cluster_default=cluster_default_het_jobs,
+    )
+    if het_components is not None:
+        endpoints = allocate_endpoints_het(
+            num_prefill=resources.num_prefill,
+            gpus_per_prefill=resources.gpus_per_prefill,
+            prefill_nodes=[f"preflight-prefill-{index}" for index in range(resources.prefill_nodes or 0)],
+            num_decode=resources.num_decode,
+            gpus_per_decode=resources.gpus_per_decode,
+            decode_nodes=[f"preflight-decode-{index}" for index in range(resources.decode_nodes or 0)],
+            gpus_per_node=resources.gpus_per_node,
+        )
+    else:
+        endpoints = config.backend.allocate_endpoints(
+            num_prefill=resources.num_prefill,
+            num_decode=resources.num_decode,
+            num_agg=resources.num_agg,
+            gpus_per_prefill=resources.gpus_per_prefill,
+            gpus_per_decode=resources.gpus_per_decode,
+            gpus_per_agg=resources.gpus_per_agg,
+            gpus_per_node=resources.gpus_per_node,
+            available_nodes=[f"preflight-worker-{index}" for index in range(resources.total_nodes)],
+            spread_workers=resources.spread_workers,
+        )
+
+    processes = config.backend.endpoints_to_processes(
+        endpoints,
+        port_allocator=NodePortAllocator(),
+        frontend_type=config.frontend.type,
+    )
+    validate_backend_process_ports(config.backend, processes)
+    return processes
 
 
 def endpoints_to_processes(

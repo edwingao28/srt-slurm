@@ -264,6 +264,27 @@ class TestDryRunExecutionExtensions:
         assert "scraper" in output
         assert "storage_subdir" in output
 
+    def test_dcgm_power_telemetry_details_shown(self, capsys):
+        config = _make_config(
+            {
+                "benchmark": {"type": "sa-bench", "isl": 8192, "osl": 1024, "concurrencies": [4]},
+                "telemetry": {
+                    "enabled": True,
+                    "provider": "dcgm-power",
+                    "default_frequency": 1.0,
+                    "storage_subdir": "power",
+                    "required": True,
+                    "dcgm_exporter": {"container_image": "dcgm-exporter", "port": 9401},
+                },
+            }
+        )
+        show_config_details(config)
+        output = capsys.readouterr().out
+        assert "dcgm-power" in output
+        assert "required" in output
+        assert "<log_dir>/power" in output
+        assert "dcgm-exporter (port 9401)" in output
+
     def test_mooncake_kv_store_details_shown(self, capsys):
         """mooncake_kv_store should appear in env vars and execution extensions."""
         config = _make_config(
@@ -427,6 +448,79 @@ class TestDryRunHetJobs:
         output = capsys.readouterr().out
         assert "Heterogeneous Job" in output
         assert "first node" in output  # infra note on the prefill row
+
+    def test_custom_power_dry_run_shows_batch_head_topology(self, capsys):
+        config = _make_config(
+            {
+                "resources": {
+                    "gpu_type": "h200",
+                    "gpus_per_node": 8,
+                    "prefill_nodes": 2,
+                    "decode_nodes": 2,
+                    "prefill_workers": 2,
+                    "decode_workers": 2,
+                    "het_jobs": True,
+                },
+                "infra": {"etcd_nats_dedicated_node": True},
+                "benchmark": {
+                    "type": "custom",
+                    "command": "true",
+                    "concurrencies": [8],
+                },
+                "telemetry": {
+                    "enabled": True,
+                    "provider": "dcgm-power",
+                    "default_frequency": 1.0,
+                    "dcgm_exporter": {
+                        "container_image": "dcgm-exporter",
+                        "port": 9401,
+                    },
+                },
+            }
+        )
+
+        show_config_details(config)
+        output = capsys.readouterr().out
+
+        assert "last non-head node" in output
+        assert "head=batch" in output
+
+    def test_sa_bench_power_dry_run_shows_batch_head_topology(self, capsys):
+        config = _make_config(
+            {
+                "resources": {
+                    "gpu_type": "b200",
+                    "gpus_per_node": 8,
+                    "prefill_nodes": 2,
+                    "decode_nodes": 2,
+                    "prefill_workers": 2,
+                    "decode_workers": 2,
+                    "het_jobs": True,
+                },
+                "infra": {"etcd_nats_dedicated_node": True},
+                "benchmark": {
+                    "type": "sa-bench",
+                    "isl": 8192,
+                    "osl": 1024,
+                    "concurrencies": [8],
+                },
+                "telemetry": {
+                    "enabled": True,
+                    "provider": "dcgm-power",
+                    "default_frequency": 1.0,
+                    "dcgm_exporter": {
+                        "container_image": "dcgm-exporter",
+                        "port": 9401,
+                    },
+                },
+            }
+        )
+
+        show_config_details(config)
+        output = capsys.readouterr().out
+
+        assert "last non-head node" in output
+        assert "head=batch" in output
 
 
 class TestDryRunRemapRoot:

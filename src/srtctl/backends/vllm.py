@@ -32,6 +32,7 @@ from srtctl.ports import (
     MOONCAKE_MASTER_PORT,
     VLLM_DATA_PARALLEL_RPC_PORT,
     VLLM_PORT_BASE,
+    VLLM_PORT_END,
     VLLM_PORT_STRIDE,
 )
 
@@ -352,9 +353,25 @@ class VLLMProtocol:
         # 4xGB200 nodes: each prefill endpoint is DEP2 (uses 2 of the 4 GPUs), so
         # two endpoints share one physical node and would otherwise scan
         # overlapping get_open_port() ranges.
-        proc_index = max(process.sys_port - DYN_SYSTEM_PORT_BASE, 0)
-        env["VLLM_PORT"] = str(VLLM_PORT_BASE + proc_index * VLLM_PORT_STRIDE)
+        env["VLLM_PORT"] = str(self._vllm_port(process))
         return env
+
+    @staticmethod
+    def _vllm_port(process: Process) -> int:
+        """Return the reserved VLLM_PORT base, failing if its window would spill."""
+        proc_index = max(process.sys_port - DYN_SYSTEM_PORT_BASE, 0)
+        vllm_port = VLLM_PORT_BASE + proc_index * VLLM_PORT_STRIDE
+        if vllm_port + VLLM_PORT_STRIDE - 1 > VLLM_PORT_END:
+            raise ValueError(
+                f"VLLM process port range exhausted at process index {proc_index}: "
+                f"the reserved range ends at {VLLM_PORT_END}"
+            )
+        return vllm_port
+
+    def validate_process_ports(self, processes: Sequence[Process]) -> None:
+        """Validate every process port window without resolving hosts or launching workers."""
+        for process in processes:
+            self._vllm_port(process)
 
     def get_mooncake_worker_env(self, infra_node_ip: str, local_hostname: str) -> dict[str, str]:
         """Get mooncake env vars to inject on a specific vLLM worker.

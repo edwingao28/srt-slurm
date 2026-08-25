@@ -1284,6 +1284,61 @@ class TestNodesInfraAllocation:
         assert nodes.head == "node1"  # Second node is head
         assert nodes.worker == ("node1", "node2")  # Infra node not in workers
 
+    def test_nodes_dedicated_infra_keeps_actual_batch_host_as_head_for_power(self):
+        """The collector and benchmark share the actual batch host's clock."""
+        from unittest.mock import patch
+
+        from srtctl.core.runtime import Nodes
+
+        with patch("srtctl.core.runtime.get_slurm_nodelist", return_value=["node0", "node1", "node2"]):
+            nodes = Nodes.from_slurm(
+                etcd_nats_dedicated_node=True,
+                batch_host_as_head=True,
+                batch_host="node2",
+            )
+
+        assert nodes.head == "node2"
+        assert nodes.infra == "node1"
+        assert nodes.worker == ("node0", "node2")
+
+    def test_nodes_reject_batch_host_outside_allocation(self):
+        from unittest.mock import patch
+
+        import pytest
+
+        from srtctl.core.runtime import Nodes
+
+        with (
+            patch("srtctl.core.runtime.get_slurm_nodelist", return_value=["node0", "node1"]),
+            pytest.raises(ValueError, match="batch host node9 is not in the SLURM allocation"),
+        ):
+            Nodes.from_slurm(batch_host_as_head=True, batch_host="node9")
+
+    def test_nodes_fail_closed_without_authoritative_batch_host(self):
+        from unittest.mock import patch
+
+        import pytest
+
+        from srtctl.core.runtime import Nodes
+
+        with (
+            patch("srtctl.core.runtime.get_slurm_nodelist", return_value=["node0", "node1"]),
+            pytest.raises(ValueError, match="batch_host is required"),
+        ):
+            Nodes.from_slurm(batch_host_as_head=True)
+
+    def test_nodes_use_actual_batch_host_without_dedicated_infra(self):
+        from unittest.mock import patch
+
+        from srtctl.core.runtime import Nodes
+
+        with patch("srtctl.core.runtime.get_slurm_nodelist", return_value=["node0", "node1"]):
+            nodes = Nodes.from_slurm(batch_host_as_head=True, batch_host="node1")
+
+        assert nodes.head == "node1"
+        assert nodes.infra == "node1"
+        assert nodes.worker == ("node0", "node1")
+
     def test_nodes_dedicated_infra_requires_two_nodes(self):
         """Test that dedicated infra node requires at least 2 nodes."""
         from unittest.mock import patch
@@ -1297,6 +1352,88 @@ class TestNodesInfraAllocation:
             pytest.raises(ValueError, match="at least 2 nodes"),
         ):
             Nodes.from_slurm(etcd_nats_dedicated_node=True)
+
+    def test_runtime_enables_batch_head_mapping_for_custom_dcgm_power(self, tmp_path):
+        from unittest.mock import patch
+
+        from srtctl.core.runtime import Nodes, RuntimeContext
+        from srtctl.core.schema import (
+            BenchmarkConfig,
+            InfraConfig,
+            ModelConfig,
+            ResourceConfig,
+            SrtConfig,
+            TelemetryConfig,
+            TelemetryExporterConfig,
+        )
+
+        config = SrtConfig(
+            name="test",
+            model=ModelConfig(path="hf:test/model", container="registry/image:tag", precision="fp8"),
+            resources=ResourceConfig(gpu_type="h200"),
+            benchmark=BenchmarkConfig(type="custom", command="true", concurrencies=[8]),
+            telemetry=TelemetryConfig(
+                enabled=True,
+                provider="dcgm-power",
+                default_frequency=1.0,
+                dcgm_exporter=TelemetryExporterConfig(container_image="dcgm-exporter", port=9401),
+            ),
+            infra=InfraConfig(etcd_nats_dedicated_node=True),
+        )
+        mapped = Nodes(head="node0", bench="node0", infra="node2", worker=("node0", "node1"))
+
+        with (
+            patch("srtctl.core.runtime.Nodes.from_slurm", return_value=mapped) as from_slurm,
+            patch("srtctl.core.runtime.get_hostname_ip", return_value="10.0.0.1"),
+            patch("srtctl.core.runtime.get_srtslurm_setting", return_value=None),
+            patch.dict("os.environ", {"SLURMD_NODENAME": "node0"}),
+        ):
+            runtime = RuntimeContext.from_config(config, job_id="123", log_dir_base=tmp_path)
+
+        assert runtime.nodes == mapped
+        assert from_slurm.call_args.kwargs["batch_host_as_head"] is True
+        assert from_slurm.call_args.kwargs["batch_host"] == "node0"
+
+    def test_runtime_enables_batch_head_mapping_for_sa_bench_dcgm_power(self, tmp_path):
+        from unittest.mock import patch
+
+        from srtctl.core.runtime import Nodes, RuntimeContext
+        from srtctl.core.schema import (
+            BenchmarkConfig,
+            InfraConfig,
+            ModelConfig,
+            ResourceConfig,
+            SrtConfig,
+            TelemetryConfig,
+            TelemetryExporterConfig,
+        )
+
+        config = SrtConfig(
+            name="test",
+            model=ModelConfig(path="hf:test/model", container="registry/image:tag", precision="fp8"),
+            resources=ResourceConfig(gpu_type="b200"),
+            benchmark=BenchmarkConfig(type="sa-bench", concurrencies=[8]),
+            telemetry=TelemetryConfig(
+                enabled=True,
+                provider="dcgm-power",
+                default_frequency=1.0,
+                dcgm_exporter=TelemetryExporterConfig(container_image="dcgm-exporter", port=9401),
+            ),
+            infra=InfraConfig(etcd_nats_dedicated_node=True),
+        )
+        mapped = Nodes(head="node0", bench="node0", infra="node2", worker=("node0", "node1"))
+
+        with (
+            patch("srtctl.core.runtime.Nodes.from_slurm", return_value=mapped) as from_slurm,
+            patch("srtctl.core.runtime.get_hostname_ip", return_value="10.0.0.1"),
+            patch("srtctl.core.runtime.get_srtslurm_setting", return_value=None),
+            patch.dict("os.environ", {"SLURMD_NODENAME": "node0"}),
+        ):
+            runtime = RuntimeContext.from_config(config, job_id="123", log_dir_base=tmp_path)
+
+        assert runtime.nodes == mapped
+        assert from_slurm.call_args.kwargs["batch_host_as_head"] is True
+        assert from_slurm.call_args.kwargs["batch_host"] == "node0"
 
 
 class TestSbatchNodeCount:
@@ -1845,6 +1982,42 @@ class TestNodesHetGroupParsing:
         assert nodes.decode_group == ("gb200-03", "gb200-04")
         # Infra node carved out of worker pool
         assert "gb200-00" not in nodes.worker
+
+    def test_from_slurm_het_keeps_actual_batch_host_as_head_for_power(self):
+        from unittest.mock import patch
+
+        from srtctl.core.runtime import Nodes
+
+        het_lists = [
+            ["gb200-00", "gb200-01", "gb200-02"],
+            ["gb200-03", "gb200-04"],
+        ]
+        with patch("srtctl.core.runtime.get_slurm_het_nodelists", return_value=het_lists):
+            nodes = Nodes.from_slurm(
+                etcd_nats_dedicated_node=True,
+                batch_host_as_head=True,
+                batch_host="gb200-02",
+            )
+
+        assert nodes.head == "gb200-02"
+        assert nodes.infra == "gb200-01"
+        assert nodes.prefill_group == ("gb200-00", "gb200-02")
+        assert nodes.decode_group == ("gb200-03", "gb200-04")
+        assert nodes.worker == ("gb200-00", "gb200-02", "gb200-03", "gb200-04")
+
+    def test_from_slurm_het_rejects_batch_host_outside_group_zero(self):
+        from unittest.mock import patch
+
+        import pytest
+
+        from srtctl.core.runtime import Nodes
+
+        het_lists = [["gb200-00", "gb200-01"], ["gb200-02", "gb200-03"]]
+        with (
+            patch("srtctl.core.runtime.get_slurm_het_nodelists", return_value=het_lists),
+            pytest.raises(ValueError, match="batch host gb200-02 must be in heterogeneous group 0"),
+        ):
+            Nodes.from_slurm(batch_host_as_head=True, batch_host="gb200-02")
 
     def test_het_group_for_returns_correct_group(self):
         from unittest.mock import patch
@@ -2420,6 +2593,7 @@ class TestVLLMDataParallelMode:
 
         from srtctl.backends import VLLMProtocol
         from srtctl.core.topology import Process
+        from srtctl.ports import DYN_SYSTEM_PORT_BASE
 
         backend = VLLMProtocol()
 
@@ -2427,7 +2601,7 @@ class TestVLLMDataParallelMode:
         process = Process(
             node="node0",
             gpu_indices=frozenset([0]),
-            sys_port=8081,
+            sys_port=DYN_SYSTEM_PORT_BASE,
             http_port=30000,
             endpoint_mode="prefill",
             endpoint_index=0,
@@ -2447,13 +2621,14 @@ class TestVLLMDataParallelMode:
         """Test vLLM handles None ports gracefully."""
         from srtctl.backends import VLLMProtocol
         from srtctl.core.topology import Process
+        from srtctl.ports import DYN_SYSTEM_PORT_BASE
 
         backend = VLLMProtocol()
 
         process = Process(
             node="node0",
             gpu_indices=frozenset([0]),
-            sys_port=8081,
+            sys_port=DYN_SYSTEM_PORT_BASE,
             http_port=30000,
             endpoint_mode="prefill",
             endpoint_index=0,

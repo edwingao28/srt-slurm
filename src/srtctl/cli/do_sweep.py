@@ -44,7 +44,7 @@ from srtctl.core.processes import (
 )
 from srtctl.core.resource_snapshot import record_resource_snapshot
 from srtctl.core.runtime import RuntimeContext
-from srtctl.core.schema import SrtConfig
+from srtctl.core.schema import SrtConfig, TelemetryProvider
 from srtctl.core.slurm import get_slurm_job_id, start_srun_process
 from srtctl.core.status import JobStage, JobStatus, StatusReporter
 from srtctl.core.topology import Endpoint, NodePortAllocator, Process, allocate_endpoints_het
@@ -458,7 +458,7 @@ class SweepOrchestrator(
             return
         except ImportError:
             logger.debug("huggingface_hub not installed on host, will use container to check/download")
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.debug("Model '%s' not fully cached, will pre-download", model_id)
 
         download_node = self.runtime.nodes.worker[0]
@@ -477,16 +477,18 @@ class SweepOrchestrator(
         download_cmd = [
             "bash",
             "-c",
-            f"export HF_HOME={q_hf_home}; "
-            f"find {q_hf_home} -name '*.lock' -mmin +30 -delete 2>/dev/null; "
-            f"DL_CMD='hf download'; "
-            f"command -v hf >/dev/null 2>&1 || DL_CMD='huggingface-cli download'; "
-            f"if HF_HUB_OFFLINE=1 $DL_CMD {q_model_id} --quiet 2>/dev/null; then "
-            f"echo 'Model already cached'; "
-            f"else "
-            f"echo 'Downloading model...'; "
-            f"$DL_CMD {q_model_id} --quiet; "
-            f"fi",
+            (
+                f"export HF_HOME={q_hf_home}; "
+                f"find {q_hf_home} -name '*.lock' -mmin +30 -delete 2>/dev/null; "
+                f"DL_CMD='hf download'; "
+                f"command -v hf >/dev/null 2>&1 || DL_CMD='huggingface-cli download'; "
+                f"if HF_HUB_OFFLINE=1 $DL_CMD {q_model_id} --quiet 2>/dev/null; then "
+                f"echo 'Model already cached'; "
+                f"else "
+                f"echo 'Downloading model...'; "
+                f"$DL_CMD {q_model_id} --quiet; "
+                f"fi"
+            ),
         ]
 
         download_log = self.runtime.log_dir / "model_download.out"
@@ -710,9 +712,13 @@ class SweepOrchestrator(
             for proc in frontend_procs:
                 registry.add_process(proc)
 
-            telemetry_procs = self.start_telemetry()
-            for proc in telemetry_procs:
-                registry.add_process(proc)
+            telemetry_config = self.config.telemetry
+            if telemetry_config.enabled and telemetry_config.provider == TelemetryProvider.DCGM_POWER:
+                self.start_power_telemetry(registry)
+            else:
+                telemetry_procs = self.start_telemetry()
+                for proc in telemetry_procs:
+                    registry.add_process(proc)
 
             self._print_connection_info()
 
@@ -724,6 +730,10 @@ class SweepOrchestrator(
                     logger.error("Eval-only evaluation failed with exit code %d", exit_code)
                 else:
                     logger.info("Eval-only evaluation completed successfully")
+            elif self.power_telemetry_blocks_benchmark():
+                logger.error("Required power telemetry failed startup - skipping the formal benchmark")
+                reporter.report(JobStatus.FAILED, JobStage.BENCHMARK, "Required power telemetry failed startup")
+                exit_code = 1
             else:
                 # Stage 4: Benchmark (status reported AFTER health check passes)
                 exit_code = self.run_benchmark(registry, stop_event, reporter)
@@ -739,12 +749,14 @@ class SweepOrchestrator(
                         logger.info("Post-benchmark eval completed successfully")
 
         except Exception as e:
-            logger.exception("Error during sweep: %s", e)
+            logger.exception("Error during sweep")
             reporter.report(JobStatus.FAILED, JobStage.CLEANUP, str(e))
             exit_code = 1
 
         finally:
             logger.info("Cleanup")
+            # NOTE: finalize before registry.cleanup() so samples and manifest are durable.
+            exit_code = self.finalize_power_telemetry(exit_code, interrupted=stop_event.is_set())
             stop_event.set()
             registry.cleanup()
             if exit_code != 0:
@@ -798,8 +810,8 @@ def main():
 
         sys.exit(exit_code)
 
-    except Exception as e:
-        logger.exception("Fatal error: %s", e)
+    except Exception:
+        logger.exception("Fatal error")
         sys.exit(1)
 
 

@@ -24,7 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -55,8 +55,9 @@ from srtctl.core.git_state import (
     write_git_state_snapshot,
 )
 from srtctl.core.lockfile import load_lockfile_fingerprints
-from srtctl.core.schema import SrtConfig, installs_dynamo
+from srtctl.core.schema import SrtConfig, TelemetryProvider, installs_dynamo
 from srtctl.core.status import create_job_record
+from srtctl.core.topology import preflight_topology_ports
 from srtctl.core.validation import preflight_config_variants
 from srtctl.ports import MOONCAKE_MASTER_PORT
 
@@ -245,8 +246,11 @@ def show_config_details(config: SrtConfig) -> None:
         het_table.add_column("Segment", style="white", justify="right", width=8)
         het_table.add_column("GPUs/node", style="white", justify="right", width=10)
         het_table.add_column("Infra", style="dim")
+        dcgm_power = config.telemetry.enabled and config.telemetry.provider == TelemetryProvider.DCGM_POWER
         for c in het_components:
-            infra_note = "first node" if c.name == "prefill" and config.infra.etcd_nats_dedicated_node else ""
+            infra_note = ""
+            if c.name == "prefill" and config.infra.etcd_nats_dedicated_node:
+                infra_note = "last non-head node; head=batch" if dcgm_power else "first node"
             het_table.add_row(
                 str(c.group),
                 c.name,
@@ -341,6 +345,11 @@ def show_config_details(config: SrtConfig) -> None:
             details.add_row("telemetry", "container_image", config.telemetry.container_image or "<unset>")
             details.add_row("telemetry", "storage_subdir", config.telemetry.storage_subdir)
             details.add_row("telemetry", "frequency", str(config.telemetry.default_frequency))
+            exporter = config.telemetry.dcgm_exporter
+            if config.telemetry.provider == TelemetryProvider.DCGM_POWER and exporter is not None:
+                details.add_row("telemetry", "required", str(config.telemetry.required))
+                details.add_row("telemetry", "artifacts", f"<log_dir>/{config.telemetry.storage_subdir}")
+                details.add_row("telemetry", "dcgm_exporter", f"{exporter.container_image} (port {exporter.port})")
 
         if mooncake_cfg is not None:
             details.add_row("mooncake", "container", mooncake_cfg.container or "<job container>")
@@ -454,7 +463,7 @@ def generate_minimal_sbatch_script(
         # Sum is informational only — the template iterates het_components and
         # ignores total_nodes when het_components is set.
         total_nodes = sum(c.nodes for c in het_components)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
 
     # Resolve container image path (expand aliases from srtslurm.yaml)
     container_image = os.path.expandvars(config.model.container)
@@ -578,6 +587,11 @@ def submit_with_orchestrator(
     if config is None:
         config = load_config(config_path)
 
+    preflight_topology_ports(
+        config,
+        cluster_default_het_jobs=get_srtslurm_setting("use_het_jobs", False),
+    )
+
     runtime_config_filename = "config.yaml"
     resolved_runtime_config_text: str | None = None
     if source_config_path:
@@ -635,7 +649,7 @@ def submit_with_orchestrator(
     os.chmod(script_path, 0o755)
 
     console.print(f"[bold cyan]🚀 Submitting:[/] {config.name}")
-    logging.debug(f"Script: {script_path}")
+    logger.debug("Script: %s", script_path)
 
     keep_script = False
     try:
@@ -680,7 +694,7 @@ def submit_with_orchestrator(
             "orchestrator": True,
             "job_id": job_id,
             "job_name": job_name,
-            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "generated_at": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             # Model info
             "model": {
                 "path": config.model.path,
@@ -839,7 +853,7 @@ def is_sweep_config(config_path: Path) -> bool:
         with open(config_path) as f:
             config = yaml.safe_load(f)
         return "sweep" in config if config else False
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -893,7 +907,11 @@ def submit_sweep(
             )
         )
 
-        sweep_dir = Path.cwd() / "dry-runs" / f"{sweep_config['name']}_sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        sweep_dir = (
+            Path.cwd()
+            / "dry-runs"
+            / f"{sweep_config['name']}_sweep_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        )
         sweep_dir.mkdir(parents=True, exist_ok=True)
 
         with open(sweep_dir / "sweep_config.yaml", "w") as f:
@@ -1048,7 +1066,7 @@ def submit_directory(
             success_count += 1
         except Exception as e:
             console.print(f"[bold red]  ❌ Error:[/] {e}")
-            logging.debug("Full traceback:", exc_info=True)
+            logger.debug("Full traceback:", exc_info=True)
             error_count += 1
 
         console.print()
@@ -1608,10 +1626,10 @@ def main():
         if json_mode:
             sys.stdout.write(json.dumps({"status": "error", "error": str(e)}) + "\n")
             sys.stdout.flush()
-            logging.debug("Full traceback:", exc_info=True)
+            logger.debug("Full traceback:", exc_info=True)
             sys.exit(1)
         console.print(f"[bold red]Error:[/] {e}")
-        logging.debug("Full traceback:", exc_info=True)
+        logger.debug("Full traceback:", exc_info=True)
         sys.exit(1)
 
     # Mock-mode post-submit: spawn the detached orchestrator worker so the

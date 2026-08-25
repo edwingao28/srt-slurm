@@ -16,6 +16,7 @@ from srtctl.core.fingerprint import generate_capture_script
 from srtctl.core.processes import ManagedProcess, NamedProcesses
 from srtctl.core.schema import build_otel_env, installs_dynamo
 from srtctl.core.slurm import CONTAINER_REMAP_ROOT_EXPORT, get_hostname_ip, start_srun_process
+from srtctl.core.topology import validate_backend_process_ports
 from srtctl.ports import ETCD_CLIENT_PORT, KV_EVENTS_PORT_BASE, KVBM_ZMQ_PORT_BASE, NATS_PORT
 
 if TYPE_CHECKING:
@@ -397,12 +398,15 @@ class WorkerStageMixin:
         """Start all backend workers."""
         logger.info("Starting backend workers")
 
+        processes = self.backend_processes
+        validate_backend_process_ports(self.backend, processes)
+
         # Check if backend uses MPI-style per-endpoint launching
         srun_config = self.backend.get_srun_config()
         launch_per_endpoint = srun_config.launch_per_endpoint
 
         grouped: dict[tuple, list[Process]] = defaultdict(list)
-        for process in self.backend_processes:
+        for process in processes:
             key = (process.endpoint_mode, process.endpoint_index)
             grouped[key].append(process)
 
@@ -410,12 +414,12 @@ class WorkerStageMixin:
 
         if launch_per_endpoint:
             # MPI-style: one srun per endpoint (TRTLLM)
-            for _endpoint_key, endpoint_processes in grouped.items():
+            for endpoint_processes in grouped.values():
                 managed = self.start_endpoint_worker(endpoint_processes)
                 result[managed.name] = managed
         else:
             # Per-process: one srun per node (SGLang)
-            for _endpoint_key, endpoint_processes in grouped.items():
+            for endpoint_processes in grouped.values():
                 for process in endpoint_processes:
                     managed = self.start_worker(process, endpoint_processes)
                     result[managed.name] = managed

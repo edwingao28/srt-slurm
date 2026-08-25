@@ -17,9 +17,22 @@ from typing import TYPE_CHECKING
 from srtctl.core.fingerprint import format_identity_verification, verify_identity
 from srtctl.core.health import wait_for_model
 from srtctl.core.lockfile import collect_worker_fingerprints
+from srtctl.core.power.contract import (
+    CONTAINER_LOG_DIR,
+    MEASUREMENT_WINDOW_BENCHMARK_TYPE_ENV,
+    MEASUREMENT_WINDOW_CONCURRENCIES_ENV,
+    MEASUREMENT_WINDOW_DIR_ENV,
+    MEASUREMENT_WINDOW_RESULT_ROOT_ENV,
+    WINDOWS_DIRNAME,
+)
+from srtctl.core.processes import terminate_and_reap
+from srtctl.core.schema import TelemetryProvider
 from srtctl.core.slurm import get_hostname_ip, start_srun_process
 from srtctl.core.status import JobStage, JobStatus, StatusReporter
 from srtctl.ports import FRONTEND_PUBLIC_PORT, SGLANG_HTTP_PORT_BASE
+
+_BENCHMARK_TERMINATE_TIMEOUT = 15.0
+_BENCHMARK_KILL_TIMEOUT = 10.0
 
 if TYPE_CHECKING:
     from srtctl.benchmarks.base import BenchmarkRunner
@@ -112,6 +125,7 @@ class BenchmarkStageMixin:
     # Type hints for mixin dependencies
     config: "SrtConfig"
     runtime: "RuntimeContext"
+    benchmark_child_reaped: bool | None = None
 
     @property
     def endpoints(self) -> list["Endpoint"]:
@@ -229,7 +243,7 @@ class BenchmarkStageMixin:
                 banner = format_identity_verification(self._identity_verification, self.config.identity)
                 for line in banner.splitlines():
                     logger.info(line)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.debug("Identity verification skipped: %s", e)
 
         if reporter:
@@ -296,6 +310,8 @@ class BenchmarkStageMixin:
         cmd = runner.build_command(self.config, self.runtime)
         env_to_set = self._get_benchmark_env(runner)
         env_to_set.update(runner.get_environment(self.config, self.runtime))
+        if self.config.benchmark.type == "custom":
+            env_to_set.update(self._get_custom_measurement_window_env())
         container_image = runner.get_container_image(self.config, self.runtime)
         container_mounts = runner.get_container_mounts(self.config, self.runtime)
 
@@ -319,15 +335,26 @@ class BenchmarkStageMixin:
             het_group=self.runtime.nodes.het_group_for(bench_node),
         )
 
+        # NOTE: the SIGTERM handler raises SystemExit, so only a finally can guarantee the child is reaped.
+        self.benchmark_child_reaped = False
         try:
             while proc.poll() is None:
                 if stop_event.is_set():
                     logger.info("Stop requested, terminating benchmark")
-                    proc.terminate()
                     return 1
                 time.sleep(1)
+            self.benchmark_child_reaped = True
             return proc.returncode or 0
         finally:
+            if proc.poll() is None:
+                self.benchmark_child_reaped = terminate_and_reap(
+                    proc,
+                    terminate_timeout=_BENCHMARK_TERMINATE_TIMEOUT,
+                    kill_timeout=_BENCHMARK_KILL_TIMEOUT,
+                )
+            elif self.benchmark_child_reaped is False:
+                proc.wait()
+                self.benchmark_child_reaped = True
             if snapshotter is not None:
                 snapshotter.stop()
 
@@ -453,6 +480,32 @@ class BenchmarkStageMixin:
             "SA_BENCH_SLOW_DOWN_WAIT_TIME": str(b.slow_down_wait_time),
         }
 
+    def _get_measurement_window_env(self) -> dict[str, str]:
+        """Point the benchmark at the power artifact's windows directory.
+
+        ``runtime.log_dir`` is already mounted at ``/logs``, so the container
+        path and the host path the collector reads are the same directory.
+        """
+        telemetry = getattr(self.config, "telemetry", None)
+        if telemetry is None or not telemetry.enabled or telemetry.provider != TelemetryProvider.DCGM_POWER:
+            return {}
+        return {MEASUREMENT_WINDOW_DIR_ENV: f"{CONTAINER_LOG_DIR}/{telemetry.storage_subdir}/{WINDOWS_DIRNAME}"}
+
+    def _get_custom_measurement_window_env(self) -> dict[str, str]:
+        env = self._get_measurement_window_env()
+        if not env:
+            return {}
+        env.update(
+            {
+                MEASUREMENT_WINDOW_BENCHMARK_TYPE_ENV: self.config.benchmark.type,
+                MEASUREMENT_WINDOW_CONCURRENCIES_ENV: " ".join(
+                    str(value) for value in self.config.benchmark.get_concurrency_list()
+                ),
+                MEASUREMENT_WINDOW_RESULT_ROOT_ENV: CONTAINER_LOG_DIR,
+            }
+        )
+        return env
+
     def _get_aiperf_server_metrics_env(
         self,
         logical_endpoints: list[tuple[str, str, int]] | None = None,
@@ -530,6 +583,9 @@ class BenchmarkStageMixin:
 
         if runner.name == "SA-Bench":
             env.update(self._get_sa_bench_slow_down_env())
+            env.update(self._get_measurement_window_env())
+        elif is_custom:
+            env.update(self._get_custom_measurement_window_env())
 
         # Built-in AIPerf runners retain physical-process metrics for vLLM DP.
         # Custom commands commonly wrap AIPerf but do not inherit from its base
