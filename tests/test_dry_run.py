@@ -449,6 +449,41 @@ class TestDryRunHetJobs:
         assert "Heterogeneous Job" in output
         assert "first node" in output  # infra note on the prefill row
 
+    def test_custom_power_dry_run_shows_batch_head_topology(self, capsys):
+        config = _make_config(
+            {
+                "resources": {
+                    "gpu_type": "h200",
+                    "gpus_per_node": 8,
+                    "prefill_nodes": 2,
+                    "decode_nodes": 2,
+                    "prefill_workers": 2,
+                    "decode_workers": 2,
+                    "het_jobs": True,
+                },
+                "infra": {"etcd_nats_dedicated_node": True},
+                "benchmark": {
+                    "type": "custom",
+                    "command": "true",
+                    "concurrencies": [8],
+                },
+                "telemetry": {
+                    "enabled": True,
+                    "default_frequency": 1.0,
+                    "dcgm_exporter": {
+                        "container_image": "dcgm-exporter",
+                        "port": 9401,
+                    },
+                },
+            }
+        )
+
+        show_config_details(config)
+        output = capsys.readouterr().out
+
+        assert "last non-head node" in output
+        assert "head=batch" in output
+
 
 class TestDryRunRemapRoot:
     """ENROOT_REMAP_ROOT is surfaced only when dynamo will be installed."""

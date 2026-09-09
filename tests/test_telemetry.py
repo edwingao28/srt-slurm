@@ -50,6 +50,12 @@ def _sa_bench(**overrides) -> BenchmarkConfig:
     return BenchmarkConfig(type="sa-bench", concurrencies=[4], client_placement="head", **overrides)
 
 
+def _custom_agentx(**overrides) -> BenchmarkConfig:
+    fields = {"type": "custom", "concurrencies": [8], "client_placement": "head", "command": "true"}
+    fields.update(overrides)
+    return BenchmarkConfig(**fields)
+
+
 def _dcgm_power(**overrides) -> TelemetryConfig:
     fields: dict = {
         "enabled": True,
@@ -103,6 +109,93 @@ class TestDcgmPowerConfig:
         config = _make_config(telemetry=_dcgm_power(), benchmark=_sa_bench())
 
         assert config.telemetry.dcgm_exporter is not None
+
+    def test_accepts_custom_agentx_with_dedicated_infra(self):
+        config = SrtConfig(
+            name="test",
+            model=ModelConfig(path="/model", container="/image", precision="fp4"),
+            resources=ResourceConfig(gpu_type="h100"),
+            benchmark=_custom_agentx(),
+            telemetry=_dcgm_power(),
+            infra=InfraConfig(etcd_nats_dedicated_node=True),
+        )
+
+        assert config.benchmark.type == "custom"
+        assert config.infra.etcd_nats_dedicated_node is True
+
+    def test_custom_agentx_rejects_measurement_window_contract_override(self):
+        fields = {
+            "name": "test",
+            "model": ModelConfig(path="/model", container="/image", precision="fp4"),
+            "resources": ResourceConfig(gpu_type="h100"),
+            "benchmark": _custom_agentx(
+                env={"SRT_MEASUREMENT_WINDOW_DIR": "/tmp/forged"},
+            ),
+            "telemetry": _dcgm_power(),
+            "infra": InfraConfig(etcd_nats_dedicated_node=True),
+        }
+
+        with pytest.raises(ValidationError, match="SRT_MEASUREMENT_WINDOW_DIR"):
+            SrtConfig(**fields)
+
+    @pytest.mark.parametrize("option", ["nodelist", "nodefile"])
+    def test_custom_agentx_rejects_benchmark_nodelist_override(self, option):
+        with pytest.raises(ValidationError, match="srun_options"):
+            SrtConfig(
+                name="test",
+                model=ModelConfig(path="/model", container="/image", precision="fp4"),
+                resources=ResourceConfig(gpu_type="h100"),
+                benchmark=_custom_agentx(),
+                telemetry=_dcgm_power(),
+                srun_options={option: "node-b"},
+            )
+
+    @pytest.mark.parametrize(
+        "variable",
+        [
+            "SLURMD_NODENAME",
+            "SLURM_NODELIST",
+            "SLURM_HET_SIZE",
+            "SLURM_JOB_NODELIST_HET_GROUP_0",
+            "SLURM_JOB_NODELIST_HET_GROUP_7",
+        ],
+    )
+    def test_custom_agentx_rejects_slurm_allocation_environment_override(self, variable):
+        with pytest.raises(ValidationError, match=variable):
+            SrtConfig(
+                name="test",
+                model=ModelConfig(path="/model", container="/image", precision="fp4"),
+                resources=ResourceConfig(gpu_type="h100"),
+                benchmark=_custom_agentx(),
+                telemetry=_dcgm_power(),
+                environment={variable: "forged-allocation"},
+            )
+
+    def test_custom_agentx_allows_explicit_slurm_batch_host(self):
+        config = SrtConfig(
+            name="test",
+            model=ModelConfig(path="/model", container="/image", precision="fp4"),
+            resources=ResourceConfig(gpu_type="h100"),
+            benchmark=_custom_agentx(),
+            telemetry=_dcgm_power(),
+            sbatch_directives={"batch": "node-b"},
+        )
+
+        assert config.sbatch_directives["batch"] == "node-b"
+
+    @pytest.mark.parametrize("dedicated_role", ["frontend", "client"])
+    def test_custom_power_rejects_dedicated_frontend_or_client(self, dedicated_role):
+        from srtctl.core.schema import FrontendConfig
+
+        with pytest.raises(ValidationError, match="on the batch host"):
+            SrtConfig(
+                name="test",
+                model=ModelConfig(path="/model", container="/image", precision="fp4"),
+                resources=ResourceConfig(gpu_type="b200"),
+                benchmark=_custom_agentx(client_dedicated_node=dedicated_role == "client"),
+                frontend=FrontendConfig(dedicated_node=dedicated_role == "frontend"),
+                telemetry=_dcgm_power(),
+            )
 
     def test_defaults_are_stable(self):
         defaults = TelemetryConfig()
@@ -176,6 +269,17 @@ class TestDcgmPowerConfig:
             ({"storage_subdir": "../escape"}, None, "storage_subdir"),
             ({"storage_subdir": ""}, None, "storage_subdir"),
             ({}, BenchmarkConfig(type="manual"), "benchmark.type"),
+            ({}, BenchmarkConfig(type="custom", command="true"), "benchmark.concurrencies"),
+            (
+                {},
+                BenchmarkConfig(
+                    type="custom",
+                    command="true",
+                    concurrencies=[8],
+                    client_placement="last_decode",
+                ),
+                "benchmark.client_placement",
+            ),
             ({}, BenchmarkConfig(type="sa-bench", concurrencies=None), "benchmark.concurrencies"),
             ({}, BenchmarkConfig(type="sa-bench", concurrencies=[4, 4]), "benchmark.concurrencies"),
             ({}, BenchmarkConfig(type="sa-bench", concurrencies=[0]), "benchmark.concurrencies"),
@@ -212,6 +316,7 @@ class TestDcgmPowerConfig:
         from srtctl.core.power import contract
 
         assert schema_module._BENCHMARK_TYPE_SA_BENCH == contract.BENCHMARK_TYPE_SA_BENCH
+        assert schema_module._BENCHMARK_TYPE_CUSTOM == contract.BENCHMARK_TYPE_CUSTOM
         assert schema_module._DCGM_POWER_MAX_SAMPLE_GAP_SECONDS == contract.MAX_SAMPLE_GAP_SECONDS
         assert (
             schema_module._DCGM_POWER_COLLECT_CYCLE_TIMEOUT_GRACE_SECONDS
@@ -707,6 +812,28 @@ class TestDcgmPowerExporterLaunch:
         assert launched == recorded
         assert "--collect-interval=50" in recorded
         assert "--address :9401" in recorded
+
+    @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
+    def test_custom_manifest_records_every_expected_agentx_window(self, mock_srun, tmp_path):
+        mock_srun.return_value = _running_exporter()
+        harness = _power_harness(tmp_path, [_worker("node-a", range(4))])
+        harness.config = _make_config(
+            telemetry=_dcgm_power(
+                startup_timeout_seconds=0.2,
+                request_timeout_seconds=0.1,
+                collector_join_timeout_seconds=3.0,
+            ),
+            benchmark=_custom_agentx(concurrencies=[8, 16]),
+        )
+
+        session = harness.start_power_telemetry(ProcessRegistry(job_id="12345"))
+        session.stop_and_finalize()
+
+        manifest = json.loads((tmp_path / "power" / "manifest.json").read_text())
+        assert manifest["expected_windows"] == [
+            {"benchmark_type": "custom", "concurrency": 8},
+            {"benchmark_type": "custom", "concurrency": 16},
+        ]
 
     @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
     def test_two_nodes_launch_two_tasks_in_one_srun(self, mock_srun, tmp_path):

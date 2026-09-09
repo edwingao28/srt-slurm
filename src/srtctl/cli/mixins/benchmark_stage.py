@@ -19,7 +19,10 @@ from srtctl.core.health import wait_for_http_endpoints, wait_for_model
 from srtctl.core.lockfile import collect_worker_fingerprints
 from srtctl.core.power.contract import (
     CONTAINER_LOG_DIR,
+    MEASUREMENT_WINDOW_BENCHMARK_TYPE_ENV,
+    MEASUREMENT_WINDOW_CONCURRENCIES_ENV,
     MEASUREMENT_WINDOW_DIR_ENV,
+    MEASUREMENT_WINDOW_RESULT_ROOT_ENV,
     WINDOWS_DIRNAME,
 )
 from srtctl.core.processes import terminate_and_reap
@@ -407,6 +410,8 @@ class BenchmarkStageMixin:
         cmd = runner.build_command(self.config, self.runtime)
         env_to_set = self._get_benchmark_env(runner)
         env_to_set.update(runner.get_environment(self.config, self.runtime))
+        if self.config.benchmark.type == "custom":
+            env_to_set.update(self._get_custom_measurement_window_env())
         container_image = runner.get_container_image(self.config, self.runtime)
         container_mounts = runner.get_container_mounts(self.config, self.runtime)
 
@@ -627,10 +632,25 @@ class BenchmarkStageMixin:
         ``runtime.log_dir`` is already mounted at ``/logs``, so the container
         path and the host path the collector reads are the same directory.
         """
-        telemetry = self.config.telemetry
-        if not telemetry.enabled:
+        telemetry = getattr(self.config, "telemetry", None)
+        if telemetry is None or not telemetry.enabled:
             return {}
         return {MEASUREMENT_WINDOW_DIR_ENV: f"{CONTAINER_LOG_DIR}/{telemetry.storage_subdir}/{WINDOWS_DIRNAME}"}
+
+    def _get_custom_measurement_window_env(self) -> dict[str, str]:
+        env = self._get_measurement_window_env()
+        if not env:
+            return {}
+        env.update(
+            {
+                MEASUREMENT_WINDOW_BENCHMARK_TYPE_ENV: self.config.benchmark.type,
+                MEASUREMENT_WINDOW_CONCURRENCIES_ENV: " ".join(
+                    str(value) for value in self.config.benchmark.get_concurrency_list()
+                ),
+                MEASUREMENT_WINDOW_RESULT_ROOT_ENV: CONTAINER_LOG_DIR,
+            }
+        )
+        return env
 
     def _get_aiperf_server_metrics_env(
         self,
@@ -820,6 +840,8 @@ class BenchmarkStageMixin:
 
         if runner.name == "SA-Bench":
             env.update(self._get_sa_bench_slow_down_env())
+        elif is_custom:
+            env.update(self._get_custom_measurement_window_env())
 
         # Built-in AIPerf runners retain physical-process metrics for vLLM DP.
         # Custom commands commonly wrap AIPerf but do not inherit from its base

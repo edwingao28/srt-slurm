@@ -273,21 +273,10 @@ def start_srun_process(
     if cpu_bind:
         srun_cmd.append(f"--cpu-bind={cpu_bind}")
 
-    srun_cmd.extend(["--nodes", str(nodes)])
-    srun_cmd.extend(["--ntasks", str(ntasks)])
-
     if cpus_per_task:
         srun_cmd.extend(["--cpus-per-task", str(cpus_per_task)])
     if gpus_per_task:
         srun_cmd.extend(["--gpus-per-task", str(gpus_per_task)])
-
-    if nodelist:
-        srun_cmd.extend(["--nodelist", ",".join(nodelist)])
-
-    # Route this srun to a specific component of a SLURM heterogeneous job.
-    # Omitted (None) for non-het jobs; safe to always pass-through from callers.
-    if het_group is not None:
-        srun_cmd.append(f"--het-group={het_group}")
 
     if output:
         srun_cmd.extend(["--output", output])
@@ -308,6 +297,20 @@ def start_srun_process(
                 srun_cmd.append(f"--{key}={value}")
             else:
                 srun_cmd.append(f"--{key}")
+
+    # Explicit caller placement and task shape are authoritative. Keep these
+    # after free-form options because Slurm lets later resource/placement
+    # options replace earlier values.
+    srun_cmd.extend(["--nodes", str(nodes)])
+    srun_cmd.extend(["--ntasks", str(ntasks)])
+
+    if nodelist:
+        srun_cmd.extend(["--nodelist", ",".join(nodelist)])
+
+    # Route this srun to a specific component of a SLURM heterogeneous job.
+    # Omitted (None) for non-het jobs; safe to always pass-through from callers.
+    if het_group is not None:
+        srun_cmd.append(f"--het-group={het_group}")
 
     # NVIDIA's enroot hook runs before the wrapped command and is activated by
     # NVIDIA_VISIBLE_DEVICES, not CUDA_VISIBLE_DEVICES.  The latter is still the
