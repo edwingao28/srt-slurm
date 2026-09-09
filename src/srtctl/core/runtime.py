@@ -72,6 +72,8 @@ class Nodes:
         cls,
         benchmark_on_separate_node: bool = False,
         etcd_nats_dedicated_node: bool = False,
+        batch_host_as_head: bool = False,
+        batch_host: str | None = None,
     ) -> "Nodes":
         """Create Nodes from SLURM environment.
 
@@ -80,22 +82,39 @@ class Nodes:
                                         second is head, rest are workers.
             etcd_nats_dedicated_node: If True, dedicate first node for etcd/nats,
                                       second node is head, rest are workers.
+            batch_host_as_head: Keep the host running the batch script as head
+                                so the collector and benchmark share one clock.
+            batch_host: Actual batch-script hostname. Required when
+                        batch_host_as_head is True.
         """
         het_lists = get_slurm_het_nodelists()
         if het_lists is not None:
-            return cls._from_het_slurm(het_lists, etcd_nats_dedicated_node)
+            return cls._from_het_slurm(
+                het_lists,
+                etcd_nats_dedicated_node,
+                batch_host_as_head,
+                batch_host,
+            )
 
         nodelist = get_slurm_nodelist()
         if not nodelist:
             raise RuntimeError("SLURM_NODELIST not set - are we running in SLURM?")
 
+        actual_batch_host = cls._resolve_batch_host(batch_host, nodelist) if batch_host_as_head else None
+
         if etcd_nats_dedicated_node:
             if len(nodelist) < 2:
                 raise ValueError("etcd_nats_dedicated_node requires at least 2 nodes")
-            infra = nodelist[0]
-            head = nodelist[1]
+            if batch_host_as_head:
+                assert actual_batch_host is not None
+                head = actual_batch_host
+                infra = next(node for node in reversed(nodelist) if node != head)
+                worker = tuple(node for node in nodelist if node != infra)
+            else:
+                infra = nodelist[0]
+                head = nodelist[1]
+                worker = tuple(nodelist[1:])
             bench = head
-            worker = tuple(nodelist[1:])
         elif benchmark_on_separate_node:
             if len(nodelist) < 2:
                 raise ValueError("benchmark_on_separate_node requires at least 2 nodes")
@@ -104,7 +123,7 @@ class Nodes:
             infra = head
             worker = tuple(nodelist[1:])
         else:
-            head = nodelist[0]
+            head = actual_batch_host or nodelist[0]
             bench = head
             infra = head
             worker = tuple(nodelist[:])
@@ -116,6 +135,8 @@ class Nodes:
         cls,
         het_lists: list[list[str]],
         etcd_nats_dedicated_node: bool,
+        batch_host_as_head: bool = False,
+        batch_host: str | None = None,
     ) -> "Nodes":
         """Carve a Nodes from a SLURM heterogeneous-job allocation.
 
@@ -130,15 +151,27 @@ class Nodes:
         if not group0 or not group1:
             raise RuntimeError("Empty SLURM_JOB_NODELIST_HET_GROUP_* — are we inside a het job?")
 
+        actual_batch_host = None
+        if batch_host_as_head:
+            actual_batch_host = cls._resolve_batch_host(batch_host, group0 + group1)
+            if actual_batch_host not in group0:
+                raise ValueError(f"batch host {batch_host} must be in heterogeneous group 0")
+
         if etcd_nats_dedicated_node:
             if len(group0) < 2:
                 raise ValueError("etcd_nats_dedicated_node requires >= 2 nodes in het group 0")
-            infra = group0[0]
-            head = group0[1]
-            prefill_group = tuple(group0[1:])
+            if batch_host_as_head:
+                assert actual_batch_host is not None
+                head = actual_batch_host
+                infra = next(node for node in reversed(group0) if node != head)
+                prefill_group = tuple(node for node in group0 if node != infra)
+            else:
+                infra = group0[0]
+                head = group0[1]
+                prefill_group = tuple(group0[1:])
         else:
-            infra = group0[0]
-            head = group0[0]
+            head = actual_batch_host or group0[0]
+            infra = head
             prefill_group = tuple(group0)
         bench = head
         decode_group = tuple(group1)
@@ -152,6 +185,15 @@ class Nodes:
             prefill_group=prefill_group,
             decode_group=decode_group,
         )
+
+    @staticmethod
+    def _resolve_batch_host(batch_host: str | None, allocation: list[str]) -> str:
+        """Resolve Slurm's authoritative batch NodeName against an allocation."""
+        if not batch_host:
+            raise ValueError("batch_host is required when batch_host_as_head is enabled")
+        if batch_host not in allocation:
+            raise ValueError(f"batch host {batch_host} is not in the SLURM allocation")
+        return batch_host
 
 
 @dataclass(frozen=True)
@@ -220,9 +262,14 @@ class RuntimeContext:
             log_dir_base: Base directory for logs (default: ./outputs)
         """
         # Get nodes from SLURM
+        batch_host_as_head = (
+            config.telemetry.enabled and config.telemetry.provider == "dcgm-power" and config.benchmark.type == "custom"
+        )
         nodes = Nodes.from_slurm(
             benchmark_on_separate_node=False,
             etcd_nats_dedicated_node=config.infra.etcd_nats_dedicated_node,
+            batch_host_as_head=batch_host_as_head,
+            batch_host=os.environ.get("SLURMD_NODENAME") if batch_host_as_head else None,
         )
 
         # Compute run_name

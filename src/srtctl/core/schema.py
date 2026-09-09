@@ -50,8 +50,24 @@ logger = logging.getLogger(__name__)
 # Local copies of srtctl.core.power.contract values so that loading a config
 # never imports the power package; equality is pinned by tests.
 _BENCHMARK_TYPE_SA_BENCH = "sa-bench"
+_BENCHMARK_TYPE_CUSTOM = "custom"
 _DCGM_POWER_MAX_SAMPLE_GAP_SECONDS = 3.0
 _DCGM_POWER_COLLECT_CYCLE_TIMEOUT_GRACE_SECONDS = 1.0
+_CUSTOM_POWER_RESERVED_ENV = frozenset(
+    {
+        "SRT_MEASUREMENT_WINDOW_DIR",
+        "SRT_MEASUREMENT_WINDOW_BENCHMARK_TYPE",
+        "SRT_MEASUREMENT_WINDOW_CONCURRENCIES",
+        "SRT_MEASUREMENT_WINDOW_RESULT_ROOT",
+    }
+)
+_CUSTOM_POWER_RESERVED_SLURM_ENV = frozenset(
+    {
+        "SLURMD_NODENAME",
+        "SLURM_HET_SIZE",
+        "SLURM_NODELIST",
+    }
+)
 
 
 def _is_safe_relative_subpath(value: str) -> bool:
@@ -1617,8 +1633,10 @@ class InfraConfig:
 
     Attributes:
         etcd_nats_dedicated_node: If True, run etcd and nats on a dedicated node
-            instead of the head node. This reserves the first node exclusively
-            for infrastructure services. Default: False.
+            instead of the head node. This normally reserves the first node.
+            A custom benchmark using dcgm-power keeps the actual Slurm batch
+            host as head and reserves the last other worker-side node instead.
+            Default: False.
         nats_max_payload_mb: Maximum NATS message payload in MB. Default: None (uses
             NATS default of 1MB). Set to 24+ for disaggregated serving with long ISL
             (e.g. 65K+ tokens where prompt data exceeds 1MB in NATS messages).
@@ -1947,10 +1965,10 @@ class SrtConfig:
     def _validate_dcgm_power(self):
         """Validate the DCGM-only power provider.
 
-        It runs its collector in the orchestrator process, so it needs neither
-        the scraper image nor node_exporter. Sample and window timestamps must
-        share one host clock, which is why the benchmark client stays on the
-        head node.
+        It runs its collector in the batch process, so it needs neither the
+        scraper image nor node_exporter. Sample and window timestamps share the
+        head-node clock. Custom benchmarks keep the batch host as head when an
+        otherwise-dedicated infrastructure node is requested.
         """
         telemetry = self.telemetry
         exporter = telemetry.dcgm_exporter
@@ -1988,17 +2006,44 @@ class SrtConfig:
         if not _is_safe_relative_subpath(telemetry.storage_subdir):
             raise ValidationError("telemetry.storage_subdir must be a safe relative path below the run log directory")
 
-        if self.benchmark.type != _BENCHMARK_TYPE_SA_BENCH:
-            raise ValidationError(f"telemetry provider dcgm-power requires benchmark.type: {_BENCHMARK_TYPE_SA_BENCH}")
+        custom_agentx = self.benchmark.type == _BENCHMARK_TYPE_CUSTOM
+        if self.benchmark.type != _BENCHMARK_TYPE_SA_BENCH and not custom_agentx:
+            raise ValidationError(
+                "telemetry provider dcgm-power requires benchmark.type: "
+                f"{_BENCHMARK_TYPE_SA_BENCH} or {_BENCHMARK_TYPE_CUSTOM}"
+            )
         if self.benchmark.client_placement != "head":
             raise ValidationError("telemetry provider dcgm-power requires benchmark.client_placement: head")
 
-        # NOTE: a dedicated infra node moves nodes.head off the batch host the collector runs on.
-        if self.infra.etcd_nats_dedicated_node:
+        # SA-Bench preserves its existing topology; custom benchmarks opt into
+        # the batch-host-as-head mapping when the runtime is constructed.
+        if self.infra.etcd_nats_dedicated_node and not custom_agentx:
             raise ValidationError(
                 "telemetry provider dcgm-power requires infra.etcd_nats_dedicated_node: false, because a "
                 "dedicated infra node moves nodes.head off the batch host and power samples would no longer "
                 "share the benchmark's clock"
+            )
+        placement_options = sorted({"nodefile", "nodelist"}.intersection(self.srun_options))
+        if custom_agentx and placement_options:
+            raise ValidationError(
+                "telemetry provider dcgm-power with benchmark.type: custom does not allow "
+                "srun_options placement keys because the benchmark must run on the collector's batch host: "
+                + ", ".join(placement_options)
+            )
+        reserved_slurm_env = sorted(
+            key
+            for key in self.environment
+            if key in _CUSTOM_POWER_RESERVED_SLURM_ENV or key.startswith("SLURM_JOB_NODELIST_HET_GROUP_")
+        )
+        if custom_agentx and reserved_slurm_env:
+            raise ValidationError(
+                "telemetry provider dcgm-power with benchmark.type: custom reserves environment keys "
+                "for authoritative Slurm allocation and batch-host placement: " + ", ".join(reserved_slurm_env)
+            )
+        reserved_env = sorted(_CUSTOM_POWER_RESERVED_ENV.intersection(self.benchmark.env))
+        if custom_agentx and reserved_env:
+            raise ValidationError(
+                "telemetry provider dcgm-power reserves benchmark.env keys: " + ", ".join(reserved_env)
             )
 
         concurrencies = self.benchmark.get_concurrency_list()

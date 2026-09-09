@@ -680,8 +680,31 @@ so list positions remain aligned. With a Dynamo frontend, endpoint and metrics U
 leader's `DYN_SYSTEM_PORT`; other frontends use the worker HTTP port. If KVBM metrics are configured,
 their URLs are appended to `AIPERF_SERVER_METRICS_URLS` after the logical worker URLs.
 
-Values in `benchmark.env` are applied last and can explicitly override any automatically injected
-variable.
+Values in `benchmark.env` are applied last for endpoint and client settings. Formal power-window
+variables are reserved when `telemetry.provider: dcgm-power` is enabled.
+
+Custom benchmarks can use the shared DCGM power collector by setting `telemetry.enabled: true`,
+`telemetry.provider: dcgm-power`, `benchmark.client_placement: head`, and a nonempty list of unique
+positive `benchmark.concurrencies`. Configure the exporter and collection period as for SA-Bench.
+The benchmark receives:
+
+| Variable | Value |
+| --- | --- |
+| `SRT_MEASUREMENT_WINDOW_DIR` | `/logs/<telemetry.storage_subdir>/windows` |
+| `SRT_MEASUREMENT_WINDOW_BENCHMARK_TYPE` | `custom` |
+| `SRT_MEASUREMENT_WINDOW_CONCURRENCIES` | Space-separated configured concurrencies |
+| `SRT_MEASUREMENT_WINDOW_RESULT_ROOT` | `/logs` |
+
+The client must publish formal running and completed window JSON for each configured concurrency,
+using the existing power-window contract and result paths below `/logs`. Merely starting a custom
+command does not establish a valid measurement; missing, unfinished, or invalid windows remain
+invalid, and `telemetry.required: true` fails the job. GPU coverage follows the backend topology,
+including follower ranks that do not expose their own inference metrics endpoint.
+
+The collector and client run on the actual Slurm batch host so their timestamps share a clock.
+With dedicated infrastructure, the final other worker-side node is reserved for infrastructure.
+Allocation identity variables, free-form `nodelist`/`nodefile` overrides, and formal power-window
+environment overrides are rejected for this path.
 
 ### sa-bench (Serving Accuracy)
 
@@ -1017,11 +1040,12 @@ infra:
 
 | Field                    | Type | Default | Description                                        |
 | ------------------------ | ---- | ------- | -------------------------------------------------- |
-| `etcd_nats_dedicated_node` | bool | false   | Reserve first node for infrastructure services     |
+| `etcd_nats_dedicated_node` | bool | false   | Reserve one node for infrastructure services       |
 
 **Notes**:
 
-- When `etcd_nats_dedicated_node: true`, the first allocated node is reserved exclusively for etcd and nats services.
+- When `etcd_nats_dedicated_node: true`, the first allocated node is normally reserved exclusively for etcd and nats services.
+- For a custom benchmark using `dcgm-power`, the actual Slurm batch host remains the logical head so the collector and benchmark share one clock. The last other worker-side node (heterogeneous group 0 for a heterogeneous job) is reserved for infrastructure instead.
 - This can improve stability for large-scale deployments by isolating infrastructure services.
 - The reserved node is not used for worker processes.
 

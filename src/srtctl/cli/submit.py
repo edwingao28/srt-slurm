@@ -259,8 +259,15 @@ def show_config_details(config: SrtConfig) -> None:
         het_table.add_column("Segment", style="white", justify="right", width=8)
         het_table.add_column("GPUs/node", style="white", justify="right", width=10)
         het_table.add_column("Infra", style="dim")
+        custom_power = (
+            config.telemetry.enabled
+            and config.telemetry.provider == TelemetryProvider.DCGM_POWER
+            and config.benchmark.type == "custom"
+        )
         for c in het_components:
-            infra_note = "first node" if c.name == "prefill" and config.infra.etcd_nats_dedicated_node else ""
+            infra_note = ""
+            if c.name == "prefill" and config.infra.etcd_nats_dedicated_node:
+                infra_note = "last non-head node; head=batch" if custom_power else "first node"
             het_table.add_row(
                 str(c.group),
                 c.name,
