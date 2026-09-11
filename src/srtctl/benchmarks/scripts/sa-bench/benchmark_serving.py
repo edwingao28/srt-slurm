@@ -69,7 +69,9 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
+from benchmark_outcome import benchmark_outcome
 from benchmark_utils import convert_to_pytorch_benchmark_format
+from measurement_window import MeasurementWindow
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -726,6 +728,7 @@ async def benchmark(
     slow_down_sleep_time: float = 1.0,
     slow_down_wait_time: float = 60.0,
     request_session: aiohttp.ClientSession | None = None,
+    measurement_window: MeasurementWindow | None = None,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -834,6 +837,9 @@ async def benchmark(
             return await request_func(request_func_input=request_func_input, pbar=pbar)
 
     benchmark_start_time = time.perf_counter()
+    benchmark_start_time_unix = time.time()
+    if measurement_window is not None:
+        measurement_window.mark_running(benchmark_start_time_unix)
     tasks: list[asyncio.Task] = []
     try:
         async for request in get_request(input_requests, request_rate, burstiness):
@@ -857,6 +863,14 @@ async def benchmark(
             )
             tasks.append(asyncio.create_task(limited_request_func(request_func_input=request_func_input, pbar=pbar)))
         outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
+        benchmark_duration = time.perf_counter() - benchmark_start_time
+        benchmark_end_time_unix = time.time()
+        if measurement_window is not None:
+            measurement_window.record_boundary(
+                start_unix=benchmark_start_time_unix,
+                end_unix=benchmark_end_time_unix,
+                duration=benchmark_duration,
+            )
     except BaseException:
         if backend == "dynamo" and request_session is not None:
             # A shared pool must outlive every request using it. Preserve the
@@ -893,7 +907,6 @@ async def benchmark(
     if pbar is not None:
         pbar.close()
 
-    benchmark_duration = time.perf_counter() - benchmark_start_time
     if backend == "dynamo" and request_session is not None and not request_session.closed:
         await request_session.close()
         # Allow asyncio to finish closing pooled transports before CPU-heavy metrics.
@@ -923,6 +936,8 @@ async def benchmark(
 
     result = {
         "duration": benchmark_duration,
+        "benchmark_start_time_unix": benchmark_start_time_unix,
+        "benchmark_end_time_unix": benchmark_end_time_unix,
         "completed": metrics.completed,
         "total_input_tokens": metrics.total_input,
         "total_output_tokens": metrics.total_output,
@@ -1072,7 +1087,7 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace, results: dict[str
             json.dump(pt_records, f)
 
 
-def main(args: argparse.Namespace):
+def _main(args: argparse.Namespace, measurement_window: MeasurementWindow | None) -> None:
     print(args)
     if args.slow_down_servers is None:
         args.slow_down_servers = []
@@ -1242,6 +1257,7 @@ def main(args: argparse.Namespace):
     benchmark_result = asyncio.run(
         run_benchmark_with_cleanup(
             reuse_http_connections=args.reuse_http_connections,
+            measurement_window=measurement_window,
             backend=backend,
             api_url=api_url,
             base_url=base_url,
@@ -1267,6 +1283,10 @@ def main(args: argparse.Namespace):
         )
     )
 
+    outcome = benchmark_outcome(len(input_requests), benchmark_result["completed"])
+    benchmark_result["benchmark_outcome"] = outcome
+
+    # Save diagnostics, including zero-success results, before failing the gate.
     # Save config and results to json
     if args.save_result:
         result_json: dict[str, Any] = {}
@@ -1278,7 +1298,6 @@ def main(args: argparse.Namespace):
         result_json["model_id"] = model_id
         result_json["tokenizer_id"] = tokenizer_id
         result_json["best_of"] = args.best_of
-        result_json["num_prompts"] = args.num_prompts
 
         # Metadata
         if args.metadata:
@@ -1299,6 +1318,10 @@ def main(args: argparse.Namespace):
         # Record the effective transport mode after both free-form metadata and
         # benchmark output so it cannot disagree with this run.
         result_json["reuse_http_connections"] = args.reuse_http_connections
+        # Dataset limits can exceed the available requests. Keep the
+        # issued count aligned with its outcome without losing CLI intent.
+        result_json["num_prompts"] = outcome["requested"]
+        result_json["requested_num_prompts"] = args.num_prompts
 
         # Save to file
         base_model_id = model_id.split("/")[-1]
@@ -1311,6 +1334,34 @@ def main(args: argparse.Namespace):
         with open(file_name, "w", encoding="utf-8") as outfile:
             json.dump(result_json, outfile)
         save_to_pytorch_benchmark_format(args, result_json, file_name)
+
+    if outcome["status"] == "failed":
+        raise SystemExit(
+            f"FAIL: request failure rate {outcome['failed'] / outcome['requested']:.1%} exceeds "
+            f"{outcome['max_failure_rate']:.0%} threshold "
+            f"({outcome['completed']}/{outcome['requested']} completed)"
+        )
+    if measurement_window is not None:
+        measurement_window.mark_completed(
+            start_unix=benchmark_result["benchmark_start_time_unix"],
+            end_unix=benchmark_result["benchmark_end_time_unix"],
+            duration=benchmark_result["duration"],
+        )
+
+
+def main(args: argparse.Namespace) -> None:
+    measurement_window = MeasurementWindow.create(
+        save_result=args.save_result,
+        result_dir=args.result_dir,
+        result_filename=args.result_filename,
+        concurrency=args.max_concurrency,
+    )
+    try:
+        _main(args, measurement_window)
+    except BaseException as exc:
+        if measurement_window is not None:
+            measurement_window.fail_at_recorded_boundary(type(exc).__name__)
+        raise
 
 
 if __name__ == "__main__":

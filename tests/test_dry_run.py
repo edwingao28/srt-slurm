@@ -485,6 +485,43 @@ class TestDryRunHetJobs:
         assert "last non-head node" in output
         assert "head=batch" in output
 
+    def test_sa_bench_power_dry_run_shows_batch_head_topology(self, capsys):
+        config = _make_config(
+            {
+                "resources": {
+                    "gpu_type": "b200",
+                    "gpus_per_node": 8,
+                    "prefill_nodes": 2,
+                    "decode_nodes": 2,
+                    "prefill_workers": 2,
+                    "decode_workers": 2,
+                    "het_jobs": True,
+                },
+                "infra": {"etcd_nats_dedicated_node": True},
+                "benchmark": {
+                    "type": "sa-bench",
+                    "isl": 8192,
+                    "osl": 1024,
+                    "concurrencies": [8],
+                },
+                "telemetry": {
+                    "enabled": True,
+                    "provider": "dcgm-power",
+                    "default_frequency": 1.0,
+                    "dcgm_exporter": {
+                        "container_image": "dcgm-exporter",
+                        "port": 9401,
+                    },
+                },
+            }
+        )
+
+        show_config_details(config)
+        output = capsys.readouterr().out
+
+        assert "last non-head node" in output
+        assert "head=batch" in output
+
 
 class TestDryRunRemapRoot:
     """ENROOT_REMAP_ROOT is surfaced only when dynamo will be installed."""

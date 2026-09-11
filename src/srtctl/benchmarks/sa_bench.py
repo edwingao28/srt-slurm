@@ -117,5 +117,6 @@ class SABenchRunner(BenchmarkRunner):
             dataset_name,
             b.dataset_path or "",
             str(b.reuse_http_connections).lower(),
+            str(b.warmup_req_rate) if b.warmup_req_rate is not None else "250",
         ]
         return cmd

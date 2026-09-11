@@ -1394,6 +1394,47 @@ class TestNodesInfraAllocation:
         assert from_slurm.call_args.kwargs["batch_host_as_head"] is True
         assert from_slurm.call_args.kwargs["batch_host"] == "node0"
 
+    def test_runtime_enables_batch_head_mapping_for_sa_bench_dcgm_power(self, tmp_path):
+        from unittest.mock import patch
+
+        from srtctl.core.runtime import Nodes, RuntimeContext
+        from srtctl.core.schema import (
+            BenchmarkConfig,
+            InfraConfig,
+            ModelConfig,
+            ResourceConfig,
+            SrtConfig,
+            TelemetryConfig,
+            TelemetryExporterConfig,
+        )
+
+        config = SrtConfig(
+            name="test",
+            model=ModelConfig(path="hf:test/model", container="registry/image:tag", precision="fp8"),
+            resources=ResourceConfig(gpu_type="b200"),
+            benchmark=BenchmarkConfig(type="sa-bench", concurrencies=[8]),
+            telemetry=TelemetryConfig(
+                enabled=True,
+                provider="dcgm-power",
+                default_frequency=1.0,
+                dcgm_exporter=TelemetryExporterConfig(container_image="dcgm-exporter", port=9401),
+            ),
+            infra=InfraConfig(etcd_nats_dedicated_node=True),
+        )
+        mapped = Nodes(head="node0", bench="node0", infra="node2", worker=("node0", "node1"))
+
+        with (
+            patch("srtctl.core.runtime.Nodes.from_slurm", return_value=mapped) as from_slurm,
+            patch("srtctl.core.runtime.get_hostname_ip", return_value="10.0.0.1"),
+            patch("srtctl.core.runtime.get_srtslurm_setting", return_value=None),
+            patch.dict("os.environ", {"SLURMD_NODENAME": "node0"}),
+        ):
+            runtime = RuntimeContext.from_config(config, job_id="123", log_dir_base=tmp_path)
+
+        assert runtime.nodes == mapped
+        assert from_slurm.call_args.kwargs["batch_host_as_head"] is True
+        assert from_slurm.call_args.kwargs["batch_host"] == "node0"
+
 
 class TestSbatchNodeCount:
     """Tests for sbatch node count calculation with infra config."""

@@ -67,6 +67,7 @@ USE_CHAT_TEMPLATE=${16:-true}
 DATASET_NAME=${17:-random}
 DATASET_PATH=${18:-}
 REUSE_HTTP_CONNECTIONS=${19:-false}
+WARMUP_REQ_RATE=${20:-250}
 
 # Build optional custom tokenizer args
 CUSTOM_TOKENIZER_ARGS=()
@@ -188,6 +189,7 @@ mkdir -p "$result_dir"
 # Start profiling before benchmark
 start_all_profiling
 
+benchmark_exit_code=0
 for concurrency in "${CONCURRENCY_LIST[@]}"; do
 
     if [ "$NUM_WARMUP_MULT" -gt 0 ]; then
@@ -201,7 +203,7 @@ for concurrency in "${CONCURRENCY_LIST[@]}"; do
             --num-prompts "$num_warmup_prompts" \
             "${RANDOM_LEN_ARGS[@]}" \
             --ignore-eos \
-            --request-rate 250 \
+            --request-rate "$WARMUP_REQ_RATE" \
             --percentile-metrics ttft,tpot,itl,e2el \
             --max-concurrency "$concurrency" \
             --trust-remote-code \
@@ -241,8 +243,12 @@ for concurrency in "${CONCURRENCY_LIST[@]}"; do
         "${CUSTOM_TOKENIZER_ARGS[@]}" \
         "${SLOW_DOWN_ARGS[@]}" \
         "${SLOW_DOWN_EXTRA[@]}" \
-        --save-result --result-dir "$result_dir" --result-filename "$result_filename"
+        --save-result --result-dir "$result_dir" --result-filename "$result_filename" || benchmark_exit_code=$?
     set +x
+    if [[ "$benchmark_exit_code" != 0 ]]; then
+        echo "SA-Bench failed at concurrency $concurrency (rc=$benchmark_exit_code); diagnostics remain in $result_dir" >&2
+        break
+    fi
 
     echo "$(date '+%Y-%m-%d %H:%M:%S')"
     echo "Completed benchmark with concurrency: $concurrency"
@@ -251,4 +257,5 @@ done
 
 stop_all_profiling
 
-echo "SA-Bench complete. Results in $result_dir"
+echo "SA-Bench finished (rc=$benchmark_exit_code). Results in $result_dir"
+exit "$benchmark_exit_code"
