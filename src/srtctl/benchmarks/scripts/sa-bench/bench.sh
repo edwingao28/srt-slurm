@@ -209,7 +209,11 @@ for concurrency in "${CONCURRENCY_LIST[@]}"; do
             --trust-remote-code \
             "${HTTP_CONNECTION_ARGS[@]}" \
             "${CHAT_TEMPLATE_ARGS[@]}" \
-            "${CUSTOM_TOKENIZER_ARGS[@]}"
+            "${CUSTOM_TOKENIZER_ARGS[@]}" || benchmark_exit_code=$?
+        if [[ "$benchmark_exit_code" != 0 ]]; then
+            echo "SA-Bench warmup failed at concurrency $concurrency (rc=$benchmark_exit_code)" >&2
+            break
+        fi
     fi
 
     num_prompts=$((concurrency * NUM_PROMPTS_MULT))
