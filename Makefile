@@ -57,7 +57,7 @@ setup:
 		echo "⬇️  Downloading NATS ($(NATS_VERSION)) for $$ARCH_SHORT..."; \
 		NATS_DEB="nats-server-$(NATS_VERSION)-$$ARCH_SHORT.deb"; \
 		NATS_URL="https://github.com/nats-io/nats-server/releases/download/$(NATS_VERSION)/$$NATS_DEB"; \
-		if ! wget -q --show-progress --tries=3 --waitretry=5 "$$NATS_URL" -O "configs/$$NATS_DEB"; then \
+		if ! curl -LsSf --connect-timeout 10 --max-time 30 --retry 2 --retry-delay 1 --retry-max-time 90 "$$NATS_URL" -o "configs/$$NATS_DEB"; then \
 			rm -f "configs/$$NATS_DEB"; \
 			echo "❌ Failed to download NATS from $$NATS_URL"; \
 			exit 1; \
@@ -86,28 +86,40 @@ setup:
 		echo "⬇️  Downloading ETCD ($(ETCD_VERSION)) for $$ARCH_SHORT..."; \
 		ETCD_TAR="etcd-$(ETCD_VERSION)-linux-$$ARCH_SHORT.tar.gz"; \
 		ETCD_URL="https://github.com/etcd-io/etcd/releases/download/$(ETCD_VERSION)/$$ETCD_TAR"; \
-		if ! wget -q --show-progress --tries=3 --waitretry=5 "$$ETCD_URL" -O "configs/$$ETCD_TAR"; then \
+		if ! curl -LsSf --connect-timeout 10 --max-time 30 --retry 2 --retry-delay 1 --retry-max-time 90 "$$ETCD_URL" -o "configs/$$ETCD_TAR"; then \
 			rm -f "configs/$$ETCD_TAR"; \
 			echo "❌ Failed to download ETCD from $$ETCD_URL"; \
 			exit 1; \
 		fi; \
 		echo "📁 Extracting ETCD binaries..."; \
-		tar -xzf "configs/$$ETCD_TAR" --strip-components=1 -C configs etcd-$(ETCD_VERSION)-linux-$$ARCH_SHORT/etcd etcd-$(ETCD_VERSION)-linux-$$ARCH_SHORT/etcdctl; \
-		chmod +x configs/etcd configs/etcdctl; \
+		tar -xzf "configs/$$ETCD_TAR" --strip-components=1 -C configs etcd-$(ETCD_VERSION)-linux-$$ARCH_SHORT/etcd etcd-$(ETCD_VERSION)-linux-$$ARCH_SHORT/etcdctl || exit 1; \
+		chmod +x configs/etcd configs/etcdctl || exit 1; \
 		rm "configs/$$ETCD_TAR"; \
 		echo "✅ ETCD installed to configs/etcd"; \
 	fi; \
 	echo ""; \
 	echo "--- uv (compute node arch: $(ARCH)) ---"; \
-	if [ -f bin/uv ] && file bin/uv | grep -q "$$ARCH_FILE_PATTERN"; then \
+	UV_BIN=$$(command -v uv || true); \
+	if [ -x bin/uv ] && file bin/uv | grep -q "$$ARCH_FILE_PATTERN"; then \
 		echo "✅ uv already installed at bin/uv ($(ARCH))"; \
+	elif [ -x "$$UV_BIN" ] && file "$$UV_BIN" | grep -q "$$ARCH_FILE_PATTERN"; then \
+		mkdir -p bin && cp "$$UV_BIN" bin/uv || exit 1; \
+		echo "✅ Reused compute-arch uv from $$UV_BIN"; \
 	else \
 		echo "⬇️  Downloading uv for $(ARCH)..."; \
-		mkdir -p bin; \
+		UV_TMP=$$(mktemp -d) || exit 1; \
+		trap 'rm -rf "$$UV_TMP"' EXIT; trap 'exit 1' HUP INT TERM; \
 		UV_URL="https://github.com/astral-sh/uv/releases/latest/download/uv-$(ARCH)-unknown-linux-gnu.tar.gz"; \
-		curl -LsSf "$$UV_URL" | tar -xz --strip-components=1 -C bin; \
-		chmod +x bin/uv bin/uvx 2>/dev/null; \
-		echo "✅ uv installed to bin/uv ($$(file bin/uv | grep -o 'ARM aarch64\|x86-64'))"; \
+		if ! curl -LsSf --connect-timeout 10 --max-time 30 --retry 2 --retry-delay 1 --retry-max-time 90 "$$UV_URL" -o "$$UV_TMP/uv.tar.gz" \
+			|| ! tar -xzf "$$UV_TMP/uv.tar.gz" --strip-components=1 -C "$$UV_TMP" \
+			|| ! chmod +x "$$UV_TMP/uv" "$$UV_TMP/uvx" \
+			|| ! file "$$UV_TMP/uv" | grep -q "$$ARCH_FILE_PATTERN"; then \
+			echo "❌ Failed to install compute-arch uv from $$UV_URL" >&2; \
+			exit 1; \
+		fi; \
+		mkdir -p bin && mv "$$UV_TMP/uv" "$$UV_TMP/uvx" bin/ || exit 1; \
+		rm -rf "$$UV_TMP"; trap - EXIT HUP INT TERM; \
+		echo "✅ uv installed to bin/uv ($(ARCH))"; \
 	fi; \
 	echo ""; \
 	echo "--- srtslurm.yaml ---"; \
