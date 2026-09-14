@@ -200,16 +200,27 @@ class SweepOrchestrator(
             critical=True,
         )
 
-        # 300s timeout to handle slow container imports on first run
-        logger.info("Waiting for NATS (port %d) on %s...", NATS_PORT, infra_node)
-        if not wait_for_port(infra_node, NATS_PORT, timeout=300):
-            raise RuntimeError("NATS failed to start")
-        logger.info("NATS is ready")
-
-        logger.info("Waiting for etcd (port %d) on %s...", ETCD_CLIENT_PORT, infra_node)
-        if not wait_for_port(infra_node, ETCD_CLIENT_PORT, timeout=300):
-            raise RuntimeError("etcd failed to start")
-        logger.info("etcd is ready")
+        # Own the child even if startup fails before this method returns.
+        registry.add_process(managed)
+        for service, port in (("NATS", NATS_PORT), ("etcd", ETCD_CLIENT_PORT)):
+            # Keep the existing per-service deadline for slow first container starts.
+            deadline = time.monotonic() + 300
+            logger.info("Waiting for %s (port %d) on %s...", service, port, infra_node)
+            ready = False
+            while True:
+                exit_code = proc.poll()
+                if exit_code is not None:
+                    raise RuntimeError(
+                        f"Infrastructure process exited with code {exit_code} while waiting for {service}; "
+                        f"node={infra_node}, log={infra_log}"
+                    )
+                if ready:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(f"{service} failed to start; node={infra_node}, log={infra_log}")
+                ready = wait_for_port(infra_node, port, timeout=min(remaining, 1.0))
+            logger.info("%s is ready", service)
 
         return managed
 
@@ -681,8 +692,7 @@ class SweepOrchestrator(
                 logger.info("Skipping NATS/etcd infrastructure (frontend.type=%s)", self.config.frontend.type)
             else:
                 reporter.report(JobStatus.STARTING, JobStage.HEAD_INFRASTRUCTURE, "Starting head infrastructure")
-                head_proc = self.start_head_infrastructure(registry)
-                registry.add_process(head_proc)
+                self.start_head_infrastructure(registry)
 
             # Stage 1b: Mooncake master (optional, co-located with infra node).
             mooncake_proc = self.start_mooncake_master(registry)
