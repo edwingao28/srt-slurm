@@ -107,6 +107,26 @@ dead endpoints. The manifest fails closed (`exporter_exited` /
 `collector_interrupted` force `publication_valid=false`); the cost is that a
 job that was simply cancelled can record `exporter_exited`.
 
+## Profiling fields and scrape latency
+
+dcgm-exporter 4.x collects synchronously inside every HTTP scrape and, when a
+profiling (`DCGM_FI_PROF_*`) field has not advanced for twice the watch
+interval, re-creates all field watches before answering. That repair takes
+0.5-2 s and is what a slow or timed-out power scrape usually is. To take the
+profiling fields out of the power exporter entirely, point the recipe command
+at the bundled counters file (mounted at `/configs` in the exporter container):
+
+```yaml
+dcgm_exporter:
+  container_image: dcgm-exporter
+  port: 9401
+  command: "dcgm-exporter --collect-interval=100 --address :{port} -f /configs/dcgm-counters-noprof.csv"
+```
+
+`configs/dcgm-counters-noprof.csv` is the 4.6.0 default list minus every
+`DCGM_FI_PROF_*` line; `power_w` and `gpu_util_pct` are unaffected and
+`sm_active` is left empty (it is optional in the samples contract).
+
 ## Diagnosing missed scrapes
 
 The collector also writes `scrape-timings.jsonl`, one compact JSON record per
