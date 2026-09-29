@@ -386,6 +386,16 @@ class TestIndependenceFromTheManifestBooleans:
         assert report.ok is False
         assert any("sample_gap_exceeded" in failure for failure in report.failures)
 
+    def test_missing_samples_within_timeout_budget_are_rejected(self, package):
+        expected = build_expected_devices(_processes())
+        rows = [row for row in _rows(expected) if (row.timestamp_unix - START) % 5 == 0]
+        log_dir, power_dir = package(rows=rows)
+
+        report = _validate(power_dir, log_dir)
+
+        assert report.ok is False
+        assert any("sample_gap_exceeded" in failure for failure in report.failures)
+
     def test_reversed_short_window_is_rejected_end_to_end(self, package):
         log_dir, power_dir = package()
         window_path = power_dir / WINDOWS_DIRNAME / f"{RESULT_STEM}.json"

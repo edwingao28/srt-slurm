@@ -326,6 +326,51 @@ class TestCoverageValidation:
         _write_result(logs, start=start, end=end, duration=result_duration if result_duration is not None else duration)
         return start, end
 
+    def test_repeated_gaps_within_timeout_budget_still_fail_density(self, logs):
+        start, end = self._completed(logs, end=4600.0, duration=3600.0)
+        sparse = _samples(start, end, step=5.0)
+        healthy = _samples(start, end, devices=(("node-b", 0, "GPU-b0"),))
+
+        rows = _validate(logs, sparse + healthy, request_timeout_seconds=2.0)
+
+        assert rows[0].power_coverage_valid is False
+        assert Reason.SAMPLE_GAP_EXCEEDED in rows[0].reason_codes
+
+    @pytest.mark.parametrize(("missing_per_hundred", "valid"), [(5, True), (6, False)])
+    def test_cumulative_sample_loss_boundary(self, logs, missing_per_hundred, valid):
+        start, end = self._completed(logs, end=4600.0, duration=3600.0)
+        observed = _samples_with_omissions(
+            start,
+            end,
+            lambda timestamp: start <= timestamp < end and 0 < (timestamp - start) % 100 < missing_per_hundred + 1,
+        )
+
+        rows = _validate(logs, observed, request_timeout_seconds=4.0)
+
+        assert rows[0].power_coverage_valid is valid
+
+    def test_cadence_jitter_does_not_accumulate_as_missing_samples(self, logs):
+        start, end = self._completed(logs, end=1100.0, duration=100.0)
+        observed = derive_observed_devices(
+            [
+                SampleRow(timestamp + (0.4 if seq % 2 else -0.4), seq, "node-a", 0, "GPU-a0", 400.0)
+                for seq, timestamp in enumerate(range(int(start) - 2, int(end) + 3))
+            ]
+        )
+
+        assert _validate(logs, observed)[0].power_coverage_valid is True
+
+    def test_short_window_edge_jitter_does_not_lose_a_sample(self, logs):
+        self._completed(logs, start=1000.0, end=1000.6, duration=0.6)
+        observed = derive_observed_devices(
+            [
+                SampleRow(timestamp, seq, "node-a", 0, "GPU-a0", 400.0)
+                for seq, timestamp in enumerate([999.9999, 1000.2001, 1000.4001, 1000.6001])
+            ]
+        )
+
+        assert _validate(logs, observed, sample_interval_seconds=0.2)[0].power_coverage_valid is True
+
     def test_bracketed_window_with_small_gaps_is_valid(self, logs):
         start, end = self._completed(logs)
 
@@ -354,10 +399,10 @@ class TestCoverageValidation:
         assert rows[0].power_coverage_valid is False
         assert Reason.MEASUREMENT_WINDOW_NOT_BRACKETED in rows[0].reason_codes
 
-    def test_gap_exactly_at_the_threshold_passes(self, logs):
+    def test_configured_three_second_cadence_passes(self, logs):
         start, end = self._completed(logs)
 
-        rows = _validate(logs, _samples(start, end, step=3.0))
+        rows = _validate(logs, _samples(start, end, step=3.0), sample_interval_seconds=3.0)
 
         assert rows[0].power_coverage_valid is True
 
@@ -370,8 +415,8 @@ class TestCoverageValidation:
         assert Reason.SAMPLE_GAP_EXCEEDED in rows[0].reason_codes
 
     def test_gap_budget_uses_the_recorded_cadence_and_timeout(self, logs):
-        start, end = self._completed(logs)
-        observed = _samples(start, end, step=4.0)
+        start, end = self._completed(logs, end=1100.0, duration=100.0)
+        observed = _samples_with_omissions(start, end, lambda timestamp: 1050 < timestamp < 1054)
 
         strict = _validate(
             logs,

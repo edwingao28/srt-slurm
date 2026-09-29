@@ -66,7 +66,17 @@ Coverage validation derives its normal gap budget from the recorded sample
 interval plus twice the request timeout (the connect and read timeout phases).
 For long measurement windows it tolerates a bounded overrun up to 10 seconds
 when one gap covers at most 0.5% and all gaps over that configured budget cover
-at most 5% of the window. Missing brackets, larger gaps, and sustained data
+at most 5% of the window. Independently, each GPU must retain at least 95% of
+the expected sampling intervals between the two samples bracketing the window.
+The expected count is `floor((last_bracket - first_bracket) / sample_interval)`;
+the observed count is the number of consecutive sample pairs in that span.
+Using the same span for both counts avoids losing a boundary sample to request
+midpoint jitter. Only the nearest brackets and in-window samples count, so
+earlier warmup data cannot hide sustained undersampling. This check also
+applies when every gap fits the request-timeout allowance. Both online
+finalization and offline validation use these
+checks; passing them is a coverage bound, not an energy-error guarantee.
+Missing brackets, larger gaps, and sustained data
 loss still fail `sample_gap_exceeded`. Telemetry stays disabled by default and
 existing `provider: scraper` recipes are unchanged.
 The collector join timeout must exceed two complete request-cycle budgets

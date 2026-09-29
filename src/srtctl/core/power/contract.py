@@ -118,6 +118,9 @@ MAX_POWER_REPORT_BOUNDARY_GAP_SECONDS = 3.0
 MAX_TOLERATED_SAMPLE_GAP_SECONDS = 10.0
 MAX_TOLERATED_SAMPLE_GAP_WINDOW_FRACTION = 0.005
 MAX_LONG_SAMPLE_GAP_WINDOW_FRACTION = 0.05
+# Timeout allowance is not a cadence allowance: every device must retain at
+# least 95% of the expected intervals across the window's bracketing samples.
+MAX_MISSING_SAMPLE_WINDOW_FRACTION = 0.05
 COLLECT_CYCLE_TIMEOUT_GRACE_SECONDS = 1.0
 
 BENCHMARK_TYPE_SA_BENCH = "sa-bench"

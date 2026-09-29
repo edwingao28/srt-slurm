@@ -13,6 +13,7 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ from pathlib import Path
 from srtctl.core.power.contract import (
     CLOCK_SOURCE,
     MAX_LONG_SAMPLE_GAP_WINDOW_FRACTION,
+    MAX_MISSING_SAMPLE_WINDOW_FRACTION,
     MAX_TOLERATED_SAMPLE_GAP_SECONDS,
     MAX_TOLERATED_SAMPLE_GAP_WINDOW_FRACTION,
     SCHEMA_VERSION,
@@ -404,6 +406,14 @@ def _sample_gaps_within_policy(
 ) -> bool:
     """Allow bounded collection overruns without hiding sustained data loss."""
     duration = end - start
+    # Compare count and time over the same bracketing span. Counting only
+    # in-window timestamps can lose an edge sample to harmless midpoint jitter.
+    if intervals:
+        span = intervals[-1][1] - intervals[0][0]
+        expected_intervals = math.floor(span / sample_interval_seconds)
+        missing_intervals = expected_intervals - len(intervals)
+        if missing_intervals > expected_intervals * MAX_MISSING_SAMPLE_WINDOW_FRACTION:
+            return False
     # requests applies one timeout to connect and again to response reads. A
     # single failed probe can therefore consume twice the configured timeout
     # before the endpoint worker returns to its fixed schedule.
