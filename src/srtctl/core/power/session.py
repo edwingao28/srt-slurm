@@ -36,6 +36,7 @@ from srtctl.core.power.contract import (
     dedupe,
     sha256_file,
 )
+from srtctl.core.power.diagnostics import ScrapeDiagnostics
 from srtctl.core.power.manifest import (
     STATUS_COMPLETE,
     STATUS_FAILED,
@@ -107,6 +108,7 @@ class _EndpointResult:
     rows: list[SampleRow]
     reason_codes: list[str]
     duration_seconds: float | None
+    timing: dict[str, Any] | None = None
 
 
 class PowerTelemetrySession:
@@ -135,6 +137,7 @@ class PowerTelemetrySession:
         self._ready_at_monotonic: float | None = None
         self._threads: list[threading.Thread] = []
         self._writer: SampleWriter | None = None
+        self._diagnostics: ScrapeDiagnostics | None = None
         self._exporters: list[ManagedProcess] = []
         self._collector_grid: tuple[int, float, float] | None = None
         self._shutdown_bracket: tuple[int, float] | None = None
@@ -200,6 +203,7 @@ class PowerTelemetrySession:
         """Create the exact CSV header and the ``starting`` manifest."""
         self.windows_dir.mkdir(parents=True, exist_ok=True)
         self._writer = SampleWriter(self.samples_path)
+        self._diagnostics = ScrapeDiagnostics(self.power_dir / "scrape-timings.jsonl")
         self._write_manifest()
 
     def add_exporter(self, process: ManagedProcess) -> None:
@@ -350,6 +354,7 @@ class PowerTelemetrySession:
         *,
         scrape_seq: int,
         scheduled_at_unix: float,
+        scheduled_monotonic: float | None = None,
     ) -> int:
         """Persist one endpoint independently and update its schedule evidence."""
         reasons = tuple(dedupe(result.reason_codes))
@@ -372,11 +377,53 @@ class PowerTelemetrySession:
                 reason_codes=reasons or (Reason.ENDPOINT_PARSE_ERROR,),
             )
 
-        with self._writer_lock:
-            if self._mutation_disabled or self._writer is None:
-                return 0
-            self._writer.append(result.rows)
-            self._writer.flush()
+        wait_started = time.monotonic()
+        write_started = None
+        write_finished = None
+        write_completed = False
+        write_error = None
+        try:
+            with self._writer_lock:
+                if self._mutation_disabled or self._writer is None:
+                    return 0
+                write_started = time.monotonic()
+                try:
+                    self._writer.append(result.rows)
+                    self._writer.flush()
+                    write_completed = True
+                finally:
+                    write_finished = time.monotonic()
+        except OSError as exc:
+            write_error = type(exc).__name__
+            raise
+        finally:
+            if self._diagnostics is not None and result.timing is not None:
+                self._diagnostics.record(
+                    {
+                        "schema_version": 1,
+                        "job_id": self._settings.job_id,
+                        "run_name": self._settings.run_name,
+                        "hostname": result.hostname,
+                        "scrape_seq": scrape_seq,
+                        **result.timing,
+                        "scheduled_at_unix": scheduled_at_unix,
+                        "schedule_lag_seconds": (
+                            max(0.0, result.timing["request_started_monotonic"] - scheduled_monotonic)
+                            if scheduled_monotonic is not None
+                            else None
+                        ),
+                        "writer_lock_wait_seconds": write_started - wait_started if write_started is not None else None,
+                        "sample_write_seconds": (
+                            write_finished - write_started
+                            if write_started is not None and write_finished is not None
+                            else None
+                        ),
+                        "sample_write_completed": write_completed,
+                        "sample_write_error": write_error,
+                        "row_count": len(result.rows),
+                        "reason_codes": list(reasons),
+                    }
+                )
 
         observed_keys = {(row.hostname, row.gpu_index) for row in result.rows}
         if observed_keys:
@@ -437,19 +484,23 @@ class PowerTelemetrySession:
     def _poll(self, endpoint: PowerEndpoint, scrape_seq: int) -> _EndpointResult:
         """One endpoint request, timestamped adjacently on the head-node clock."""
         started_unix = time.time()
-        started_monotonic = time.perf_counter()
+        started_monotonic = time.monotonic()
+        body = None
+        http_status = None
+        error_type = None
+        reasons = []
         try:
             response = requests.get(endpoint.url, timeout=self._settings.request_timeout_seconds)
+            http_status = response.status_code
             response.raise_for_status()
             body = response.text
-        except requests.Timeout:
-            return _EndpointResult(endpoint.hostname, [], [Reason.ENDPOINT_TIMEOUT], None)
-        except requests.RequestException:
-            return _EndpointResult(endpoint.hostname, [], [Reason.ENDPOINT_HTTP_ERROR], None)
-        settled_monotonic = time.perf_counter()
+        except requests.RequestException as exc:
+            reasons.append(Reason.ENDPOINT_TIMEOUT if isinstance(exc, requests.Timeout) else Reason.ENDPOINT_HTTP_ERROR)
+            error_type = type(exc).__name__
+        settled_monotonic = time.monotonic()
         settled_unix = time.time()
 
-        scrape = parse_power_scrape(body)
+        scrape = parse_power_scrape(body) if body is not None else None
         timestamp_unix = (started_unix + settled_unix) / 2
         rows = [
             SampleRow(
@@ -462,13 +513,23 @@ class PowerTelemetrySession:
                 gpu_util_pct=reading.gpu_util_pct,
                 sm_active=reading.sm_active,
             )
-            for reading in scrape.readings
+            for reading in (scrape.readings if scrape is not None else ())
         ]
         return _EndpointResult(
             hostname=endpoint.hostname,
             rows=rows,
-            reason_codes=list(scrape.reason_codes),
-            duration_seconds=settled_monotonic - started_monotonic,
+            reason_codes=list(scrape.reason_codes) if scrape is not None else reasons,
+            duration_seconds=settled_monotonic - started_monotonic if body is not None else None,
+            timing={
+                "request_started_at_unix": started_unix,
+                "request_finished_at_unix": settled_unix,
+                "request_started_monotonic": started_monotonic,
+                "request_duration_seconds": settled_monotonic - started_monotonic,
+                "parse_seconds": time.monotonic() - settled_monotonic,
+                "sample_timestamp_unix": timestamp_unix if rows else None,
+                "http_status": http_status,
+                "error_type": error_type,
+            },
         )
 
     def _run_endpoint(
@@ -492,6 +553,7 @@ class PowerTelemetrySession:
                     result,
                     scrape_seq=scrape_seq,
                     scheduled_at_unix=scheduled_at_unix,
+                    scheduled_monotonic=next_cycle,
                 )
                 scrape_seq += 1
                 next_cycle += interval
@@ -543,6 +605,7 @@ class PowerTelemetrySession:
                 result,
                 scrape_seq=bracket_scrape_seq,
                 scheduled_at_unix=bracket_scheduled_at_unix,
+                scheduled_monotonic=started_monotonic + bracket_scheduled_at_unix - started_unix,
             )
         except Exception:
             logger.exception("Power collector stopped for endpoint %s", endpoint.hostname)
@@ -617,6 +680,8 @@ class PowerTelemetrySession:
         if not self._writer_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
             self.record_reason(Reason.COLLECTOR_JOIN_TIMEOUT)
             self._outcome = self._minimal_terminal_manifest()
+            if self._diagnostics is not None:
+                self._diagnostics.close(deadline)
             return self._outcome
         try:
             self._mutation_disabled = True
@@ -626,6 +691,8 @@ class PowerTelemetrySession:
             self._writer_lock.release()
 
         self._outcome = self._finalize_manifest(allow_window_mutation=allow_window_mutation)
+        if self._diagnostics is not None:
+            self._diagnostics.close(deadline)
         return self._outcome
 
     def _minimal_terminal_manifest(self) -> SessionOutcome:

@@ -79,9 +79,27 @@ flight when shutdown starts plus the final bracketing scrape.
 <log_dir>/<storage_subdir>/
 ├── manifest.json
 ├── samples.csv
+├── scrape-timings.jsonl
 └── windows/
     └── <benchmark-result-stem>.json
 ```
+
+`scrape-timings.jsonl` is optional diagnostic evidence, excluded from publication
+validation. Each endpoint record joins samples by `hostname` and `scrape_seq`
+and includes the job/run identity, request start/end, HTTP status or exception,
+sample timestamp, parse duration, scheduling lag, sample-writer lock wait and
+CSV write/flush duration. Scheduling lag is null for manual `collect_once()`
+calls, which have no fixed schedule. Failed requests retain timing even though
+they produce no sample; the manifest's maximum successful scrape duration
+keeps its existing meaning.
+
+Only a daemon writes this sidecar, through a queue capped at 128 records.
+Queue overflow drops diagnostics, never power samples. A final
+`diagnostic_summary` reports the number dropped. A missing summary means the
+sidecar may be incomplete, including file failure or a blocked write/close.
+Diagnostic I/O holds no sample-writer lock and shutdown waits only within the
+collector's existing deadline. Sample-write failures retain the existing
+collector failure behavior; diagnostics do not make invalid data publishable.
 
 `samples.csv` has the exact header
 `schema_version,timestamp_unix,scrape_seq,hostname,gpu_index,gpu_uuid,power_w`,
