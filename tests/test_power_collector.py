@@ -795,7 +795,7 @@ class TestFailurePaths:
 
         assert Reason.EXPORTER_EXITED not in outcome.reason_codes
 
-    def test_unexpected_device_invalidates_publication(self, tmp_path, exporters):
+    def test_nonparticipating_device_is_excluded_from_samples(self, tmp_path, exporters):
         a = exporters(_body("a", count=GPUS_PER_NODE + 1))
         b = exporters(_body("b"))
         session = _session(tmp_path, _endpoints(("node-a", a.url), ("node-b", b.url)))
@@ -804,8 +804,12 @@ class TestFailurePaths:
         session.collect_once()
         outcome = session.stop_and_finalize()
 
-        assert Reason.UNEXPECTED_DEVICE in outcome.reason_codes
-        assert outcome.publication_valid is False
+        rows, reasons = read_samples(session.samples_path)
+        assert reasons == ()
+        assert {(row.hostname, row.gpu_index) for row in rows} == {
+            (node, gpu) for node in ("node-a", "node-b") for gpu in range(GPUS_PER_NODE)
+        }
+        assert Reason.UNEXPECTED_DEVICE not in outcome.reason_codes
 
 
 class TestPublication:

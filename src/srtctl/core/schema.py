@@ -52,8 +52,9 @@ from srtctl.core.formatting import (
     FormattablePathField,
 )
 
-# Leaf module (stdlib-only imports), so this cannot cycle back into schema.
+# Leaf modules (stdlib and prometheus-free imports), so these cannot cycle back into schema.
 from srtctl.core.power.contract import CONTAINER_LOG_DIR
+from srtctl.core.power.profile import POWER_PROFILES
 from srtctl.core.roles import COLOCATE, PER_ROLE_ENGINE_KEYS, ROLE_NAMES, ROLE_TO_MODE
 from srtctl.core.source import DynamoSourceConfig, is_commit_sha
 from srtctl.ports import DYNAMO_SIDECAR_GRPC_PORT
@@ -1413,6 +1414,11 @@ class TelemetryExporterConfig:
     port: int
     command: str | None = None
     binary: str | None = None
+    # GPU power telemetry only: which ``srtctl.core.power.profile`` row describes
+    # this exporter's power metric and device labels (``dcgm`` when unset;
+    # ``amd-device-metrics`` for rocm/device-metrics-exporter). Also supplies the
+    # default ``command``.
+    power_profile: str | None = None
 
     Schema: ClassVar[type[Schema]] = Schema
 
@@ -3211,6 +3217,11 @@ class SrtConfig:
             raise ValidationError("telemetry.dcgm_exporter.container_image must be non-empty")
         if not 1 <= exporter.port <= 65535:
             raise ValidationError("telemetry.dcgm_exporter.port must be in 1..65535")
+        if exporter.power_profile is not None and exporter.power_profile not in POWER_PROFILES:
+            known = ", ".join(sorted(POWER_PROFILES))
+            raise ValidationError(
+                f"telemetry.dcgm_exporter.power_profile={exporter.power_profile!r} is unknown; known profiles: {known}"
+            )
 
         for name in ("startup_timeout_seconds",):
             if not _is_finite_positive(getattr(telemetry, name)):
