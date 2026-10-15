@@ -990,6 +990,10 @@ mod tests {
             read_started_at: start + Duration::from_secs(6),
             body: "new module sample".to_owned(),
         });
+        let recovered = ModuleState::Ready(ModuleSnapshot {
+            read_started_at: start + Duration::from_secs(12),
+            body: "recovered module sample".to_owned(),
+        });
         let logs = capture_logs(|| {
             let mut warned = false;
             for (state, at) in [
@@ -1002,15 +1006,19 @@ mod tests {
                 (&stale, start + Duration::from_secs(5)),
                 (&fresh, start + Duration::from_secs(6)),
                 (&fresh, start + Duration::from_secs(7)),
-                (&ModuleState::Missing, start + Duration::from_secs(8)),
-                (&ModuleState::Unavailable, start + Duration::from_secs(9)),
+                (&fresh, start + Duration::from_secs(10)),
+                (&fresh, start + Duration::from_secs(11)),
+                (&recovered, start + Duration::from_secs(12)),
+                (&ModuleState::Missing, start + Duration::from_secs(13)),
+                (&ModuleState::Unavailable, start + Duration::from_secs(14)),
             ] {
                 report_module_status(&mut warned, state.status(at));
             }
         });
-        assert_eq!(logs.matches("WARN").count(), 2, "{logs}");
-        assert_eq!(logs.matches("INFO").count(), 1, "{logs}");
+        assert_eq!(logs.matches("WARN").count(), 3, "{logs}");
+        assert_eq!(logs.matches("INFO").count(), 2, "{logs}");
         assert!(logs.contains("status=NotReady"), "{logs}");
+        assert!(logs.contains("status=Stale"), "{logs}");
         assert!(logs.contains("status=Missing"), "{logs}");
         assert!(logs.contains("NVML module power recovered"), "{logs}");
     }

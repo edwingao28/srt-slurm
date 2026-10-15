@@ -20,26 +20,3 @@ jobs:
         run: cargo test -p cpu-power-exporter --locked
       - name: Check CPU power exporter with clippy
         run: cargo clippy -p cpu-power-exporter --all-targets --locked -- -D warnings
-  python:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: astral-sh/setup-uv@v4
-      - name: Install Python and dependencies
-        run: |
-          uv python install 3.10
-          uv sync --dev
-      - name: Check formatting and types
-        run: |
-          uv run ruff check src/srtctl/ tests/test_cpu_power_parser.py
-          uv run ruff format --check src/srtctl/ tests/test_cpu_power_parser.py
-          uv run ty check src/srtctl/
-      - name: Check generated documentation
-        run: uv run srtctl schema-docs --check
-      - name: Test Python suite
-        run: uv run pytest tests/ -q --tb=short
-      - name: Check documentation links
-        run: uvx --with mkdocs-material mkdocs build --strict

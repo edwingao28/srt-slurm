@@ -237,8 +237,9 @@ family produced, so the exporter warns once at startup for a module socket
 with no CPU socket.
 
 The series is best-effort. When NVML is unavailable the exporter logs the
-reason at INFO and omits the series; `module_w` stays blank. NVML is the only source of `module_w`. A firmware
-`Module Power Socket N` ACPI meter stays unclassified. A scrape that carries
+reason at INFO and omits the series; `module_w` stays blank. NVML is the only
+source of `module_w`. A firmware `Module Power Socket N` ACPI meter stays
+unclassified. A scrape that carries
 only the NVML series has no socket power and writes no rows.
 
 ## Output Format
