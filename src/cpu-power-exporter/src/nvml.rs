@@ -450,7 +450,7 @@ fn group_by_socket(samples: &[GpuSample]) -> (Vec<ModuleReading>, Vec<Disagreeme
 pub fn render_module_metrics(readings: &[ModuleReading]) -> String {
     let mut out = String::from(
         "# HELP cpu_power_nvml_watts Superchip module power per Grace socket via NVML (W, 1 s average): \
-         Grace, its GPUs, HBM, LPDDR5X and regulators.\n\
+         Grace, its GPUs and the rest of the module.\n\
          # TYPE cpu_power_nvml_watts gauge\n",
     );
     for r in readings {
@@ -508,7 +508,7 @@ mod tests {
         assert_eq!(logs.matches("INFO").count(), 1, "{logs}");
     }
 
-    const HEADER: &str = "# HELP cpu_power_nvml_watts Superchip module power per Grace socket via NVML (W, 1 s average): Grace, its GPUs, HBM, LPDDR5X and regulators.\n# TYPE cpu_power_nvml_watts gauge\n";
+    const HEADER: &str = "# HELP cpu_power_nvml_watts Superchip module power per Grace socket via NVML (W, 1 s average): Grace, its GPUs and the rest of the module.\n# TYPE cpu_power_nvml_watts gauge\n";
 
     const NVML_ERROR_NOT_SUPPORTED: u32 = 3;
 

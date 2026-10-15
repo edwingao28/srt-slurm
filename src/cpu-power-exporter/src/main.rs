@@ -25,8 +25,8 @@
 //!
 //! Alongside either back-end, NVML module power is exposed as
 //! `cpu_power_nvml_watts{type="module",socket,gpus,source="nvml"}`:
-//! one sample per Grace socket covering Grace, its GPUs, HBM, LPDDR5X and
-//! regulators, averaged over the socket's GPUs. It is pre-rendered by its own
+//! one sample per Grace socket covering Grace, its GPUs and the rest of the
+//! module, averaged over the socket's GPUs. It is pre-rendered by its own
 //! poller thread, like the ACPI cache, so no scrape waits on NVML.
 //! Best-effort; the family is absent when `libnvidia-ml.so` or module power
 //! is unavailable.
@@ -203,7 +203,7 @@ enum MetricsState {
 }
 
 struct ModuleSnapshot {
-    rendered_at: Instant,
+    read_started_at: Instant,
     body: String,
 }
 
@@ -234,7 +234,7 @@ impl ModuleState {
             Self::Unavailable => ModuleStatus::Unavailable,
             Self::Missing => ModuleStatus::Missing,
             Self::Ready(snapshot)
-                if now.duration_since(snapshot.rendered_at) <= MODULE_STALE_AFTER =>
+                if now.duration_since(snapshot.read_started_at) <= MODULE_STALE_AFTER =>
             {
                 ModuleStatus::Fresh
             }
@@ -835,7 +835,7 @@ fn init_module_cache(cpu_sockets: BTreeSet<String>) -> Result<Arc<RwLock<ModuleS
                 "NVML module reader initialised"
             );
             // PCI NUMA IDs match ACPI sockets on the measured GB200 host;
-            // GB300 is unverified. Unmatched sockets cannot reach a CPU CSV row.
+            // GB300 is unverified.
             for socket in sockets {
                 if !cpu_sockets.contains(&socket.to_string()) {
                     tracing::warn!(
@@ -846,14 +846,13 @@ fn init_module_cache(cpu_sockets: BTreeSet<String>) -> Result<Arc<RwLock<ModuleS
                 }
             }
             loop {
-                // A read that stalls must not make an old batch look fresh on return.
-                let rendered_at = Instant::now();
+                let read_started_at = Instant::now();
                 let readings = reader.read();
                 let fresh = if readings.is_empty() {
                     ModuleState::Missing
                 } else {
                     ModuleState::Ready(ModuleSnapshot {
-                        rendered_at,
+                        read_started_at,
                         body: nvml::render_module_metrics(&readings),
                     })
                 };
@@ -959,7 +958,7 @@ mod tests {
             assert_eq!(metrics.render(), cpu);
         }
         *module.write().unwrap() = ModuleState::Ready(ModuleSnapshot {
-            rendered_at: Instant::now(),
+            read_started_at: Instant::now(),
             body: sample(),
         });
         let fresh = metrics.render();
@@ -968,12 +967,12 @@ mod tests {
             "cpu_power_nvml_watts{type=\"module\",socket=\"0\",gpus=\"0,1\",source=\"nvml\"} 600.000000\n"
         ));
         *module.write().unwrap() = ModuleState::Ready(ModuleSnapshot {
-            rendered_at: Instant::now() - Duration::from_secs(4),
+            read_started_at: Instant::now() - Duration::from_secs(4),
             body: sample(),
         });
         assert_eq!(metrics.render(), cpu);
         *module.write().unwrap() = ModuleState::Ready(ModuleSnapshot {
-            rendered_at: Instant::now(),
+            read_started_at: Instant::now(),
             body: sample(),
         });
         assert_eq!(metrics.render(), fresh);
@@ -984,11 +983,11 @@ mod tests {
         let start = Instant::now();
         let pending = ModuleState::Pending(start);
         let stale = ModuleState::Ready(ModuleSnapshot {
-            rendered_at: start,
+            read_started_at: start,
             body: "module sample".to_owned(),
         });
         let fresh = ModuleState::Ready(ModuleSnapshot {
-            rendered_at: start + Duration::from_secs(6),
+            read_started_at: start + Duration::from_secs(6),
             body: "new module sample".to_owned(),
         });
         let logs = capture_logs(|| {
