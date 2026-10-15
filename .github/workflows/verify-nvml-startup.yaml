@@ -12,13 +12,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
         run: rustup show
-      - name: Confirm blocked initialization regression
-        shell: bash
-        run: |
-          set +e
-          cargo test -p cpu-power-exporter --locked --test nvml_startup > baseline.log 2>&1
-          result=$?
-          set -e
-          cat baseline.log
-          test "$result" -ne 0
-          grep -F "CPU metrics unavailable while NVML initialization is blocked" baseline.log
+      - name: Check formatting
+        run: cargo fmt --package cpu-power-exporter --check
+      - name: Test CPU power exporter
+        run: cargo test -p cpu-power-exporter --locked
+      - name: Check CPU power exporter with clippy
+        run: cargo clippy -p cpu-power-exporter --all-targets --locked -- -D warnings
