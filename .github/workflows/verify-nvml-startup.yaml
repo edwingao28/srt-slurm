@@ -1,0 +1,24 @@
+name: Verify NVML startup
+on:
+  push:
+    branches: [chore/verify-nvml-startup]
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Confirm blocked initialization regression
+        shell: bash
+        run: |
+          set +e
+          cargo test -p cpu-power-exporter --locked --test nvml_startup > baseline.log 2>&1
+          result=$?
+          set -e
+          cat baseline.log
+          test "$result" -ne 0
+          grep -F "CPU metrics unavailable while NVML initialization is blocked" baseline.log
