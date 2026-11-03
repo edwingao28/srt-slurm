@@ -99,15 +99,30 @@ setup:
 	fi; \
 	echo ""; \
 	echo "--- uv (compute node arch: $(ARCH)) ---"; \
-	if [ -f bin/uv ] && file bin/uv | grep -q "$$ARCH_FILE_PATTERN"; then \
+	if [ -x bin/uv ] && [ -x bin/uvx ] && \
+		file -b bin/uv | grep -q "$$ARCH_FILE_PATTERN" && \
+		file -b bin/uvx | grep -q "$$ARCH_FILE_PATTERN"; then \
 		echo "✅ uv already installed at bin/uv ($(ARCH))"; \
 	else \
 		echo "⬇️  Downloading uv for $(ARCH)..."; \
-		mkdir -p bin; \
+		mkdir -p bin || exit 1; \
+		UV_TMP_DIR=$$(mktemp -d bin/.uv-XXXXXX) || exit 1; \
+		trap 'rm -rf "$$UV_TMP_DIR"' 0; \
 		UV_URL="https://github.com/astral-sh/uv/releases/latest/download/uv-$(ARCH)-unknown-linux-gnu.tar.gz"; \
-		curl -LsSf "$$UV_URL" | tar -xz --strip-components=1 -C bin; \
-		chmod +x bin/uv bin/uvx 2>/dev/null; \
-		echo "✅ uv installed to bin/uv ($$(file bin/uv | grep -o 'ARM aarch64\|x86-64'))"; \
+		curl -LsSf --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 60 \
+			"$$UV_URL" -o "$$UV_TMP_DIR/uv.tar.gz" || exit 1; \
+		tar -xzf "$$UV_TMP_DIR/uv.tar.gz" --strip-components=1 -C "$$UV_TMP_DIR" || exit 1; \
+		for binary in uv uvx; do \
+			if ! file -b "$$UV_TMP_DIR/$$binary" | grep -q "$$ARCH_FILE_PATTERN"; then \
+				echo "❌ Downloaded $$binary is not a $(ARCH) binary" >&2; \
+				exit 1; \
+			fi; \
+			chmod +x "$$UV_TMP_DIR/$$binary" || exit 1; \
+		done; \
+		mv "$$UV_TMP_DIR/uv" "$$UV_TMP_DIR/uvx" bin/ || exit 1; \
+		rm -rf "$$UV_TMP_DIR"; \
+		trap - 0; \
+		echo "✅ uv installed to bin/uv ($(ARCH))"; \
 	fi; \
 	echo ""; \
 	echo "--- srtslurm.yaml ---"; \
