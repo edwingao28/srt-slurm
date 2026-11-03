@@ -161,8 +161,7 @@ class TestSABenchRunner:
         )
         cmd = runner.build_command(config, runtime)
         assert "random" in cmd
-        assert cmd[-2] == ""  # empty dataset path
-        assert cmd[-1] == "false"  # per-request HTTP sessions by default
+        assert cmd[-3:] == ["", "false", "250"]
 
     def test_build_command_enables_http_connection_reuse(self):
         """Explicit opt-in is appended without shifting existing arguments."""
@@ -184,13 +183,13 @@ class TestSABenchRunner:
                 concurrencies="4x8",
                 dataset_path="/data/bench.jsonl",
                 reuse_http_connections=True,
+                warmup_req_rate=37,
             ),
         )
 
         cmd = runner.build_command(config, runtime)
 
-        assert cmd[-2] == "/data/bench.jsonl"
-        assert cmd[-1] == "true"
+        assert cmd[-3:] == ["/data/bench.jsonl", "true", "37"]
 
     def test_http_connection_reuse_schema_default_and_roundtrip(self):
         """The YAML field is typed and remains opt-in when omitted."""

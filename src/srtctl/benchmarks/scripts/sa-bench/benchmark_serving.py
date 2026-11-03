@@ -836,10 +836,11 @@ async def benchmark(
         async with semaphore:
             return await request_func(request_func_input=request_func_input, pbar=pbar)
 
+    if measurement_window is not None:
+        measurement_window.mark_running(time.time())
+    # Keep the synchronous marker write outside the measured request interval.
     benchmark_start_time = time.perf_counter()
     benchmark_start_time_unix = time.time()
-    if measurement_window is not None:
-        measurement_window.mark_running(benchmark_start_time_unix)
     tasks: list[asyncio.Task] = []
     try:
         async for request in get_request(input_requests, request_rate, burstiness):

@@ -10,6 +10,7 @@ import subprocess
 import sys
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from test_sa_bench_http_session import SA_BENCH_DIR, _import_sa_bench_module
@@ -119,14 +120,34 @@ def test_main_saves_diagnostics_and_window_before_failure_gate(
     assert window["benchmark_end_time_unix"] == 102
 
 
-def test_all_failed_requests_still_return_finite_diagnostics_and_formal_boundary(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("marker_delay", [0, 5])
+def test_all_failed_requests_still_return_finite_diagnostics_and_formal_boundary(
+    tmp_path: Path, monkeypatch, marker_delay: int
+) -> None:
     module = _import_sa_bench_module("benchmark_serving")
     window = module.MeasurementWindow(str(tmp_path / "window.json"), "result.json", 2)
+    clock = 100
     requests = 0
+    mark_running = window.mark_running
+
+    def slow_mark_running(start_unix):
+        nonlocal clock
+        mark_running(start_unix)
+        clock += marker_delay
+
+    monkeypatch.setattr(window, "mark_running", slow_mark_running)
+    monkeypatch.setattr(module, "time", SimpleNamespace(time=lambda: clock, perf_counter=lambda: clock))
 
     async def fake_request(request_func_input, pbar=None):
-        nonlocal requests
+        nonlocal clock, requests
+        if request_func_input.api_url.endswith("/start_profile"):
+            return module.RequestFuncOutput(success=True)
+        if request_func_input.api_url.endswith("/stop_profile"):
+            clock = 500
+            return module.RequestFuncOutput(success=True)
         requests += 1
+        if requests > 1:
+            clock += 1
         return module.RequestFuncOutput(
             success=requests == 1, output_tokens=1, prompt_len=8, error="" if requests == 1 else "server error"
         )
@@ -147,7 +168,7 @@ def test_all_failed_requests_still_return_finite_diagnostics_and_formal_boundary
                 request_rate=float("inf"),
                 burstiness=1,
                 disable_tqdm=True,
-                profile=False,
+                profile=True,
                 selected_percentile_metrics=[],
                 selected_percentiles=[50],
                 ignore_eos=True,
@@ -160,11 +181,18 @@ def test_all_failed_requests_still_return_finite_diagnostics_and_formal_boundary
     assert result["completed"] == 0
     assert result["total_output_tokens"] == 0
     assert result["errors"] == ["server error", "server error"]
-    assert result["benchmark_end_time_unix"] >= result["benchmark_start_time_unix"]
+    assert result["benchmark_start_time_unix"] == 100 + marker_delay
+    assert result["benchmark_end_time_unix"] == 102 + marker_delay
+    assert result["duration"] == 2
     assert window.fail_at_recorded_boundary("request_gate_failed") is True
+    recorded_window = json.loads(Path(window.path).read_text())
+    assert recorded_window["benchmark_start_time_unix"] == result["benchmark_start_time_unix"]
+    assert recorded_window["benchmark_end_time_unix"] == result["benchmark_end_time_unix"]
+    assert recorded_window["duration"] == result["duration"]
 
 
-def test_shell_retains_client_exit_and_custom_warmup_rate(tmp_path: Path) -> None:
+@pytest.mark.parametrize("failed_stage", ["warmup", "measured"])
+def test_shell_retains_client_exit_and_custom_warmup_rate(tmp_path: Path, failed_stage: str) -> None:
     binary = tmp_path / "bin"
     binary.mkdir()
     calls = tmp_path / "calls.jsonl"
@@ -173,7 +201,8 @@ def test_shell_retains_client_exit_and_custom_warmup_rate(tmp_path: Path) -> Non
 import json, sys
 if "-c" in sys.argv: sys.exit(0)
 with open({str(calls)!r}, "a") as stream: stream.write(json.dumps(sys.argv[1:]) + "\\n")
-sys.exit(7 if "--save-result" in sys.argv else 0)
+stage = "measured" if "--save-result" in sys.argv else "warmup"
+sys.exit(7 if stage == {failed_stage!r} else 0)
 """)
     python.chmod(0o755)
     for name in ("curl", "mkdir"):
@@ -213,6 +242,9 @@ sys.exit(7 if "--save-result" in sys.argv else 0)
     )
     assert result.returncode == 7, result.stderr
     recorded = [json.loads(line) for line in calls.read_text().splitlines()]
-    assert len(recorded) == 2
+    assert len(recorded) == (1 if failed_stage == "warmup" else 2)
     assert recorded[0][recorded[0].index("--request-rate") + 1] == "37"
-    assert "--save-result" in recorded[1]
+    if failed_stage == "warmup":
+        assert "SA-Bench warmup failed at concurrency 2 (rc=7)" in result.stderr
+    else:
+        assert "--save-result" in recorded[1]
